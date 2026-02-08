@@ -545,6 +545,7 @@ This is an academic project demonstrating ML engineering principles. The code is
 
 ## 📄 License
 
+MIT License.
 This project is submitted as part of academic coursework. It serves as a demonstration of ML engineering best practices and may be used as a learning reference.
 
 ---
@@ -584,4 +585,5 @@ This project shows how to:
 
 **Last Updated:** February 2024  
 **Python Version:** 3.8+  
+
 **Status:** Production-ready for academic demonstration
