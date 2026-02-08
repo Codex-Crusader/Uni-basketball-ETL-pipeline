@@ -8,6 +8,11 @@
 ![Full Marks or Else](https://img.shields.io/badge/Grade-Full%20Marks%20or%20Else%20🔫-red)
 ![Full Marks in Exchange for Puppy](https://img.shields.io/badge/Deal-Full%20Marks%20for%20a%20Puppy-ff69b4)
 
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/9f092cb4-afaa-4475-8682-af2f6bc7a819" width="48%" />
+  <img src="https://github.com/user-attachments/assets/2b897a19-4bb6-43e7-b7eb-5a69a12edeb3" width="48%" />
+</p>
+
 ---
 
 ## 📋 Overview
@@ -587,3 +592,4 @@ This project shows how to:
 **Python Version:** 3.8+  
 
 **Status:** Production-ready for academic demonstration
+
