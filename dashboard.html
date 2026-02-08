@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Basketball Game Prediction</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            padding: 30px;
+        }
+
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+        }
+
+        .model-info {
+            background: #f0f0f0;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 25px;
+            text-align: center;
+        }
+
+        .model-info strong {
+            color: #667eea;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 25px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+
+        .tab {
+            padding: 12px 24px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 600;
+            color: #666;
+            border-bottom: 3px solid transparent;
+            transition: all 0.3s;
+        }
+
+        .tab:hover {
+            color: #667eea;
+        }
+
+        .tab.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .stat-card h4 {
+            font-size: 0.9em;
+            margin-bottom: 10px;
+            opacity: 0.9;
+        }
+
+        .stat-card .value {
+            font-size: 2em;
+            font-weight: bold;
+        }
+
+        .charts-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .chart-container {
+            background: #f9f9f9;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .chart-container h3 {
+            color: #555;
+            margin-bottom: 15px;
+            font-size: 1.1em;
+            text-align: center;
+        }
+
+        .chart-wrapper {
+            position: relative;
+            height: 300px;
+        }
+
+        .full-width-chart {
+            grid-column: 1 / -1;
+        }
+
+        .form-section {
+            margin-bottom: 25px;
+        }
+
+        .form-section h2 {
+            color: #555;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 5px;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        label {
+            font-weight: 600;
+            margin-bottom: 5px;
+            color: #555;
+            font-size: 0.9em;
+        }
+
+        input {
+            padding: 10px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 1em;
+            transition: border-color 0.3s;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .predict-button {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 20px;
+            transition: transform 0.2s;
+        }
+
+        .predict-button:hover {
+            transform: translateY(-2px);
+        }
+
+        .predict-button:active {
+            transform: translateY(0);
+        }
+
+        .result {
+            margin-top: 25px;
+            padding: 20px;
+            border-radius: 5px;
+            text-align: center;
+            display: none;
+        }
+
+        .result.show {
+            display: block;
+        }
+
+        .result.home-win {
+            background: #d4edda;
+            border: 2px solid #28a745;
+        }
+
+        .result.away-win {
+            background: #f8d7da;
+            border: 2px solid #dc3545;
+        }
+
+        .result h3 {
+            font-size: 1.5em;
+            margin-bottom: 10px;
+        }
+
+        .result.home-win h3 {
+            color: #28a745;
+        }
+
+        .result.away-win h3 {
+            color: #dc3545;
+        }
+
+        .confidence {
+            font-size: 1.1em;
+            color: #555;
+            margin-top: 10px;
+        }
+
+        .error {
+            background: #f8d7da;
+            border: 2px solid #dc3545;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+            display: none;
+        }
+
+        .error.show {
+            display: block;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        .loading.show {
+            display: block;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Basketball Game Predictor</h1>
+        <p class="subtitle">University ML Course Project</p>
+
+        <div class="model-info" id="modelInfo">
+            <strong>Loading model information...</strong>
+        </div>
+
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab(event, 'analytics')">📊 Analytics</button>
+            <button class="tab" onclick="switchTab(event, 'predict')">🔮 Make Prediction</button>
+        </div>
+
+        <div id="analytics-tab" class="tab-content active">
+            <div class="stats-grid" id="statsGrid">
+                <div class="stat-card">
+                    <h4>Total Games</h4>
+                    <div class="value" id="totalGames">-</div>
+                </div>
+                <div class="stat-card">
+                    <h4>Home Wins</h4>
+                    <div class="value" id="homeWins">-</div>
+                </div>
+                <div class="stat-card">
+                    <h4>Away Wins</h4>
+                    <div class="value" id="awayWins">-</div>
+                </div>
+                <div class="stat-card">
+                    <h4>Home Win Rate</h4>
+                    <div class="value" id="homeWinRate">-</div>
+                </div>
+            </div>
+
+            <div class="charts-grid">
+                <div class="chart-container">
+                    <h3>Model Performance Comparison</h3>
+                    <div class="chart-wrapper">
+                        <canvas id="modelComparisonChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <h3>Outcome Distribution</h3>
+                    <div class="chart-wrapper">
+                        <canvas id="outcomeChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-container full-width-chart">
+                    <h3>Feature Averages by Outcome</h3>
+                    <div class="chart-wrapper">
+                        <canvas id="featureChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="predict-tab" class="tab-content">
+            <form id="predictionForm">
+                <div class="form-section">
+                    <h2>Home Team Statistics</h2>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label for="home_ppg">Points Per Game</label>
+                            <input type="number" id="home_ppg" step="0.1" value="75.5" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="home_fg_pct">Field Goal %</label>
+                            <input type="number" id="home_fg_pct" step="0.001" min="0" max="1" value="0.450" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="home_rebounds">Rebounds Per Game</label>
+                            <input type="number" id="home_rebounds" step="0.1" value="38.5" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="home_assists">Assists Per Game</label>
+                            <input type="number" id="home_assists" step="0.1" value="18.2" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="home_turnovers">Turnovers Per Game</label>
+                            <input type="number" id="home_turnovers" step="0.1" value="12.5" required>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-section">
+                    <h2>Away Team Statistics</h2>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label for="away_ppg">Points Per Game</label>
+                            <input type="number" id="away_ppg" step="0.1" value="72.3" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="away_fg_pct">Field Goal %</label>
+                            <input type="number" id="away_fg_pct" step="0.001" min="0" max="1" value="0.435" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="away_rebounds">Rebounds Per Game</label>
+                            <input type="number" id="away_rebounds" step="0.1" value="36.8" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="away_assists">Assists Per Game</label>
+                            <input type="number" id="away_assists" step="0.1" value="16.5" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="away_turnovers">Turnovers Per Game</label>
+                            <input type="number" id="away_turnovers" step="0.1" value="13.2" required>
+                        </div>
+                    </div>
+                </div>
+
+                <button type="submit" class="predict-button">Predict Winner</button>
+            </form>
+
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p style="margin-top: 10px;">Making prediction...</p>
+            </div>
+
+            <div class="result" id="result"></div>
+            <div class="error" id="error"></div>
+        </div>
+    </div>
+
+    <script>
+        let modelComparisonChart, outcomeChart, featureChart;
+
+        function switchTab(event, tabName) {
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            event.target.classList.add('active');
+
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            document.getElementById(tabName + '-tab').classList.add('active');
+
+            if (tabName === 'analytics') {
+                loadAnalytics();
+            }
+        }
+
+        async function loadModelInfo() {
+            try {
+                const response = await fetch('/model_info');
+                const data = await response.json();
+
+                if (data.error) {
+                    document.getElementById('modelInfo').innerHTML =
+                        '<strong> No model loaded. Please train a model first.</strong>';
+                } else {
+                    document.getElementById('modelInfo').innerHTML = `
+                        <strong>Active Model:</strong> ${data.model_name} |
+                        <strong>Accuracy:</strong> ${(data.accuracy * 100).toFixed(2)}% |
+                        <strong>F1-Score:</strong> ${data.f1.toFixed(4)}
+                    `;
+                }
+            } catch (error) {
+                document.getElementById('modelInfo').innerHTML =
+                    '<strong> Could not load model information</strong>';
+            }
+        }
+
+        async function loadAnalytics() {
+            try {
+                const response = await fetch('/analytics');
+                const data = await response.json();
+
+                if (data.error) {
+                    console.error('Analytics error:', data.error);
+                    alert('Error loading analytics: ' + data.error);
+                    return;
+                }
+
+                document.getElementById('totalGames').textContent = data.total_games;
+                document.getElementById('homeWins').textContent = data.home_wins;
+                document.getElementById('awayWins').textContent = data.away_wins;
+                document.getElementById('homeWinRate').textContent =
+                    (data.home_win_rate * 100).toFixed(1) + '%';
+
+                createModelComparisonChart(data.model_comparison);
+                createOutcomeChart(data.home_wins, data.away_wins);
+                createFeatureChart(data.feature_stats);
+
+            } catch (error) {
+                console.error('Error loading analytics:', error);
+                alert('Failed to load analytics: ' + error.message);
+            }
+        }
+
+        function createModelComparisonChart(modelData) {
+            const ctx = document.getElementById('modelComparisonChart').getContext('2d');
+
+            if (modelComparisonChart) {
+                modelComparisonChart.destroy();
+            }
+
+            const models = Object.keys(modelData);
+            const accuracy = models.map(m => modelData[m].accuracy * 100);
+            const precision = models.map(m => modelData[m].precision * 100);
+            const recall = models.map(m => modelData[m].recall * 100);
+            const f1 = models.map(m => modelData[m].f1 * 100);
+
+            modelComparisonChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: models,
+                    datasets: [
+                        {
+                            label: 'Accuracy',
+                            data: accuracy,
+                            backgroundColor: 'rgba(102, 126, 234, 0.7)',
+                            borderColor: 'rgba(102, 126, 234, 1)',
+                            borderWidth: 1
+                        },
+                        {
+                            label: 'Precision',
+                            data: precision,
+                            backgroundColor: 'rgba(118, 75, 162, 0.7)',
+                            borderColor: 'rgba(118, 75, 162, 1)',
+                            borderWidth: 1
+                        },
+                        {
+                            label: 'Recall',
+                            data: recall,
+                            backgroundColor: 'rgba(40, 167, 69, 0.7)',
+                            borderColor: 'rgba(40, 167, 69, 1)',
+                            borderWidth: 1
+                        },
+                        {
+                            label: 'F1-Score',
+                            data: f1,
+                            backgroundColor: 'rgba(255, 193, 7, 0.7)',
+                            borderColor: 'rgba(255, 193, 7, 1)',
+                            borderWidth: 1
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 100,
+                            title: {
+                                display: true,
+                                text: 'Score (%)'
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'bottom'
+                        }
+                    }
+                }
+            });
+        }
+
+        function createOutcomeChart(homeWins, awayWins) {
+            const ctx = document.getElementById('outcomeChart').getContext('2d');
+
+            if (outcomeChart) {
+                outcomeChart.destroy();
+            }
+
+            outcomeChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Home Wins', 'Away Wins'],
+                    datasets: [{
+                        data: [homeWins, awayWins],
+                        backgroundColor: [
+                            'rgba(40, 167, 69, 0.7)',
+                            'rgba(220, 53, 69, 0.7)'
+                        ],
+                        borderColor: [
+                            'rgba(40, 167, 69, 1)',
+                            'rgba(220, 53, 69, 1)'
+                        ],
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom'
+                        }
+                    }
+                }
+            });
+        }
+
+        function createFeatureChart(featureStats) {
+            const ctx = document.getElementById('featureChart').getContext('2d');
+
+            if (featureChart) {
+                featureChart.destroy();
+            }
+
+            const features = Object.keys(featureStats.home_win);
+            const homeWinValues = features.map(f => featureStats.home_win[f]);
+            const awayWinValues = features.map(f => featureStats.away_win[f]);
+
+            featureChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: features.map(f => f.replace(/_/g, ' ').toUpperCase()),
+                    datasets: [
+                        {
+                            label: 'Home Wins (Avg)',
+                            data: homeWinValues,
+                            backgroundColor: 'rgba(40, 167, 69, 0.7)',
+                            borderColor: 'rgba(40, 167, 69, 1)',
+                            borderWidth: 1
+                        },
+                        {
+                            label: 'Away Wins (Avg)',
+                            data: awayWinValues,
+                            backgroundColor: 'rgba(220, 53, 69, 0.7)',
+                            borderColor: 'rgba(220, 53, 69, 1)',
+                            borderWidth: 1
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'bottom'
+                        }
+                    }
+                }
+            });
+        }
+
+        loadModelInfo();
+        loadAnalytics();
+
+        document.getElementById('predictionForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            document.getElementById('result').classList.remove('show');
+            document.getElementById('error').classList.remove('show');
+            document.getElementById('loading').classList.add('show');
+
+            const formData = {
+                home_ppg: document.getElementById('home_ppg').value,
+                away_ppg: document.getElementById('away_ppg').value,
+                home_fg_pct: document.getElementById('home_fg_pct').value,
+                away_fg_pct: document.getElementById('away_fg_pct').value,
+                home_rebounds: document.getElementById('home_rebounds').value,
+                away_rebounds: document.getElementById('away_rebounds').value,
+                home_assists: document.getElementById('home_assists').value,
+                away_assists: document.getElementById('away_assists').value,
+                home_turnovers: document.getElementById('home_turnovers').value,
+                away_turnovers: document.getElementById('away_turnovers').value
+            };
+
+            try {
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(formData)
+                });
+
+                const data = await response.json();
+
+                document.getElementById('loading').classList.remove('show');
+
+                if (data.error) {
+                    document.getElementById('error').textContent = data.error;
+                    document.getElementById('error').classList.add('show');
+                } else {
+                    const resultDiv = document.getElementById('result');
+                    const isHomeWin = data.prediction === 'Home Win';
+
+                    resultDiv.className = 'result show ' + (isHomeWin ? 'home-win' : 'away-win');
+
+                    let confidenceText = '';
+                    if (data.confidence !== null && data.confidence !== undefined) {
+                        confidenceText = `<p class="confidence">Confidence: ${(data.confidence * 100).toFixed(1)}%</p>`;
+                    }
+
+                    resultDiv.innerHTML = `
+                        <h3>${data.prediction}</h3>
+                        ${confidenceText}
+                        <p style="margin-top: 10px; font-size: 0.9em; color: #666;">
+                            Model: ${data.model_name}
+                        </p>
+                    `;
+                }
+            } catch (error) {
+                document.getElementById('loading').classList.remove('show');
+                document.getElementById('error').textContent = 'Error: ' + error.message;
+                document.getElementById('error').classList.add('show');
+            }
+        });
+    </script>
+</body>
+</html>
