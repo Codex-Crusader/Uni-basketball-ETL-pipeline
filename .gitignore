@@ -1,0 +1,82 @@
+# =========================
+# Python cache / bytecode
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# =========================
+# Virtual environments
+# =========================
+.venv/
+venv/
+env/
+ENV/
+
+# =========================
+# Environment / secrets
+# =========================
+.env
+.env.*
+*.env
+
+# =========================
+# Data & generated artifacts
+# =========================
+data.json
+*.csv
+*.parquet
+*.db
+
+# =========================
+# Trained models & artifacts
+# =========================
+*.pkl
+*.joblib
+models/
+model_*.bin
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+
+# =========================
+# Build / distribution (PyInstaller, etc.)
+# =========================
+build/
+dist/
+*.spec
+
+# =========================
+# OS / Editor junk
+# =========================
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+.history/
+
+# PyCharm / JetBrains
+.idea/
+
+# =========================
+# Test / coverage artifacts
+# =========================
+.pytest_cache/
+.coverage
+htmlcov/
+
+# =========================
+# Jupyter (even if you don't use it)
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Temporary files
+# =========================
+*.tmp
+*.bak
+*.swp
