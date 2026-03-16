@@ -23,6 +23,8 @@ ENV/
 # =========================
 # Data & generated artifacts
 # =========================
+data/games.json
+data/learning_log.json
 data.json
 *.csv
 *.parquet
