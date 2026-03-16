@@ -1,6 +1,6 @@
 # 🔄 Code Flow Documentation
 
-> *Complete architecture and data flow documentation for the basketball predictor system*
+> *Complete architecture and data flow documentation for the NCAA basketball predictor system*
 
 ---
 
@@ -9,563 +9,422 @@
 1. [System Overview](#system-overview)
 2. [Architecture Components](#architecture-components)
 3. [Command Execution Flows](#command-execution-flows)
-4. [Data Flow](#data-flow)
-5. [Storage Architecture](#storage-architecture)
-6. [Model Training Pipeline](#model-training-pipeline)
-7. [Prediction Serving](#prediction-serving)
-8. [Dashboard Integration](#dashboard-integration)
+4. [Auto-Learning Pipeline](#auto-learning-pipeline)
+5. [Data Flow](#data-flow)
+6. [Storage Architecture](#storage-architecture)
+7. [Model Training Pipeline](#model-training-pipeline)
+8. [Prediction Serving](#prediction-serving)
+9. [Dashboard Integration](#dashboard-integration)
 
 ---
 
 ## 🏛️ System Overview
 
-The basketball predictor is built as a **script-based ML pipeline** with four main operational modes:
+The basketball predictor is built as a **config-driven, self-improving ML pipeline** with six operational modes and a background auto-learn scheduler.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     main.py (655 lines)                      │
-│                  Single Script Architecture                  │
+│                     main.py (~1000 lines)                    │
+│              Config-Driven Single Script Architecture        │
 └────────────────────┬────────────────────────────────────────┘
+                     │
+              config.yaml (all settings)
                      │
           Command Line Arguments Parser
                      │
-         ┌───────────┼───────────┬──────────┐
-         │           │           │          │
-         ▼           ▼           ▼          ▼
-    [GENERATE]  [FETCH-API]  [TRAIN]   [SERVE]
+    ┌────────┬────────┼────────┬────────┬────────┐
+    │        │        │        │        │        │
+    ▼        ▼        ▼        ▼        ▼        ▼
+[--fetch] [--gen  [--train] [--serve] [--list [--activate
+         synth]                      models]   VERSION]
 ```
 
 ### Design Philosophy
 
-**Single Script Architecture:** All logic resides in `main.py` to keep the system:
-- Easy to understand (no jumping between files)
-- Easy to debug (everything in one place)
-- Easy to deploy (single file + dependencies)
-- Easy to modify (change one file)
+**Config-Driven Architecture:** All settings live in `config.yaml`. No value is hardcoded in Python — feature lists, model hyperparameters, thresholds, team name, intervals, file paths, and API endpoints are all read from config at startup.
 
-**Separation via Functions:** Within `main.py`, concerns are separated into logical sections:
-- Data Generation (lines 38-106)
-- Storage Layer (lines 113-275)
-- Model Training (lines 282-413)
-- Prediction Server (lines 419-585)
-- Command Interface (lines 591-655)
+**Single Script + Background Thread:** All logic resides in `main.py`. When `--serve` is used, a daemon `AutoLearnScheduler` thread runs alongside Flask, continuously fetching data and retraining without user intervention.
+
+**Promote-Only Model Updates:** A new model only replaces the active model if its ROC-AUC exceeds the current model by at least `promote_threshold` (default 0.002). The model can only improve, never regress.
 
 ---
 
 ## 📊 Architecture Components
 
-### Layer 1: Command Line Interface
+### Layer 0: Config Loading
 
-**Location:** `main()` function (lines 591-655)
-
-**Purpose:** Parse user commands and route to appropriate functions
-
-**Commands Supported:**
-```bash
---generate      # Create initial dataset
---fetch-api     # Simulate fetching new data
---train         # Train and evaluate models
---serve         # Start web server
---storage       # Choose storage backend (local/snowflake)
-```
-
-**Design Pattern:** Command pattern with argument parser
+**Function:** `load_config(path)` — runs at module import time
 
 ```python
-parser = argparse.ArgumentParser()
-parser.add_argument('--generate', action='store_true')
-parser.add_argument('--fetch-api', action='store_true')
-parser.add_argument('--train', action='store_true')
-parser.add_argument('--serve', action='store_true')
-parser.add_argument('--storage', choices=['local', 'snowflake'])
+CFG        = load_config()
+APP_CFG    = CFG["app"]
+HT_CFG     = CFG["home_team"]       # Duke Blue Devils, court, ESPN ID
+DATA_CFG   = CFG["data"]            # features list, paths, split sizes
+API_CFG    = CFG["ncaa_api"]        # ESPN endpoints, season, rate limit
+SF_CFG     = CFG["snowflake"]       # credentials via env vars
+MODEL_CFG  = CFG["models"]          # enabled models + hyperparams
+AL_CFG     = CFG["auto_learn"]      # intervals, thresholds
+```
+
+Every subsequent function reads from these module-level dicts. Changing any setting requires only a `config.yaml` edit.
+
+---
+
+### Layer 1: Command Line Interface
+
+**Function:** `main()`
+
+**Commands:**
+
+```bash
+--fetch                # Fetch real NCAA games from ESPN API
+--generate-synthetic   # Generate synthetic fallback data (500 games)
+--train                # Train all models, register best by ROC-AUC
+--serve                # Start Flask + auto-learn scheduler
+--list-models          # Print version table to console
+--activate VERSION     # Set active model (e.g. --activate v3)
+--storage local|snowflake  # Storage backend (default: local)
 ```
 
 ---
 
-### Layer 2: Data Generation
+### Layer 2: Data Ingestion
 
-**Functions:**
-- `generate_synthetic_data(num_games=500)` (lines 38-90)
-- `simulate_api_fetch(num_new_games=100)` (lines 97-106)
+#### ESPN API (`ESPNFetcher`)
 
-**Data Generation Algorithm:**
+Real NCAA data, no API key required.
 
 ```
-For each game:
-  1. Generate random feature values from uniform distributions
-     • home_ppg ~ U(65, 95)
-     • home_fg_pct ~ U(0.40, 0.55)
-     • ... (10 features total)
-  
-  2. Calculate strength scores
-     home_strength = weighted_sum(home_features) + 3  # +3 = home advantage
-     away_strength = weighted_sum(away_features)
-  
-  3. Determine outcome probabilistically
-     if home_strength > away_strength:
-       outcome = 1 with 85% probability (home wins)
-     else:
-       outcome = 0 with 85% probability (away wins)
-  
-  4. Round and format as JSON object
+get_game_ids(start, end)
+  │
+  └─ Iterates day-by-day from Nov 1 to Apr 30 of configured season
+     └─ GET /scoreboard?dates=YYYYMMDD → list of event IDs
+
+get_box_score(event_id)
+  │
+  ├─ GET /summary?event=ID
+  ├─ Parses boxscore.teams → home_d, away_d
+  ├─ Extracts stats dict: {fieldGoalPct, totalRebounds, assists, ...}
+  ├─ Reads header.competitions[0].competitors for scores
+  └─ Returns game dict with 14 features + outcome + metadata
 ```
 
-**Why Synthetic Data:**
-- Demonstrates the system architecture
-- No API dependencies for basic demo
-- Reproducible results
-- Known ground truth (we control outcome generation)
+**Rate limiting:** `time.sleep(delay)` between every request (configurable in `config.yaml`).
 
-**Future:** Can be replaced with real API calls without changing rest of system.
+**Field normalization:** FG% from ESPN arrives as `"45.5"` (percent string). `norm_pct()` divides by 100 if value > 1.
+
+#### Custom API (`CustomAPIFetcher`)
+
+Stub for user-provided APIs. Set `provider: custom` in `config.yaml`, fill `base_url` and `field_map`. No code changes needed.
+
+#### Synthetic Fallback (`_generate_synthetic`)
+
+Used when ESPN is unavailable. Generates realistic game records using uniform distributions and a weighted strength formula with home court advantage (+3). Outcome has 15% noise to avoid perfect separability.
 
 ---
 
 ### Layer 3: Storage Abstraction
 
-**Local Storage (JSON):**
-- `save_to_json(data)` (lines 113-118)
-- `load_from_json()` (lines 121-131)
-- `append_to_json(new_data)` (lines 134-139)
+**Local (default):**
 
-**Cloud Storage (Snowflake):**
-- `get_snowflake_connection()` (lines 146-159)
-- `create_snowflake_table(conn)` (lines 162-183)
-- `save_to_snowflake(data)` (lines 186-220)
-- `load_from_snowflake()` (lines 223-242)
-- `append_to_snowflake(new_data)` (lines 245-275)
-
-**Storage Pattern:**
-
-```
-Application Code
-       │
-       ├─ if storage == 'local':
-       │    └─ save_to_json()
-       │
-       └─ elif storage == 'snowflake':
-            └─ save_to_snowflake()
-
-Common Interface → Different Implementations
+```python
+save_to_json(data)      # full overwrite
+load_from_json()        # full read
+append_to_json(data)    # load → deduplicate by game_id → save
 ```
 
-**Benefits:**
-- Swap storage without changing training code
-- Local mode for development
-- Snowflake mode for production
-- Same data format regardless of backend
+Deduplication prevents the same ESPN game from being counted twice across fetch runs.
+
+**Snowflake (optional):**
+
+```python
+_sf_conn()              # reads credentials from env vars
+_sf_create_table(conn)  # CREATE TABLE IF NOT EXISTS
+save_to_snowflake(data) # DELETE + bulk INSERT
+append_to_snowflake(data) # INSERT only
+```
+
+Snowflake is disabled by default (`enabled: false` in config). Enable by setting `enabled: true` and providing `SNOWFLAKE_USER` / `SNOWFLAKE_PASSWORD` environment variables.
+
+**Common interface:** `load_data(storage)` routes to either backend transparently. Training code never knows which backend is active.
 
 ---
 
-### Layer 4: Feature Engineering
+### Layer 4: Team Stats Engine
 
-**Function:** `prepare_data(data)` (lines 282-298)
+**Function:** `build_team_stats(data)`
 
-**Transformation Pipeline:**
+This is what powers the predict form's auto-fill. For every game in the dataset, each team's stats are accumulated regardless of whether they were home or away:
 
 ```
-Input: List of game dictionaries
-       [
-         {"game_id": "GAME_0001", "home_ppg": 78.45, ...},
-         {"game_id": "GAME_0002", "home_ppg": 82.31, ...},
-         ...
-       ]
+For each game:
+  Home team → accumulate home_* columns under their home_* feature keys
+  Home team → accumulate away_* columns (mirrored) under their home_* keys
+  Away team → same logic, mirrored
 
-Step 1: Extract feature names (fixed order)
-        feature_names = ['home_ppg', 'away_ppg', 'home_fg_pct', ...]
-
-Step 2: Build feature matrix
-        features = [[78.45, 72.31, 0.478, ...],
-                   [82.31, 76.54, 0.491, ...],
-                   ...]
-
-Step 3: Extract labels
-        labels = [1, 0, 1, ...]
-
-Step 4: Convert to NumPy
-        X = np.array(features)  # shape: (n_games, 10)
-        y = np.array(labels)    # shape: (n_games,)
-
-Output: (X, y) tuple ready for sklearn
+For each team:
+  Average all accumulated values → season average per feature
+  Count games_played, wins
 ```
 
-**Critical Constraint:** Feature order must be consistent across training and prediction!
+This means Duke's `home_ppg` stat represents their average points scored per game — not just when they were the home side. The feature names remain `home_*` / `away_*` because that's what the model was trained on; they represent "the team filling the home slot" vs "the team filling the away slot" in a prediction.
+
+**`get_home_team_stats(data)`:** Fuzzy-matches the configured home team name and returns their stats dict. Used by the `/home_team` endpoint to pre-fill the prediction form.
 
 ---
 
 ### Layer 5: Model Training
 
-**Function:** `train_and_evaluate_models(storage_mode)` (lines 301-413)
+**Function:** `train_and_evaluate(storage, triggered_by)`
 
-**Training Pipeline:**
+**Models built by `build_models()`:**
+
+All wrapped in `StandardScaler → estimator` Pipeline. This means scaling is part of the model object itself — no separate scaler needs to be saved or loaded.
+
+| Key in config | Class | Notes |
+|---------------|-------|-------|
+| `gradient_boosting` | `GradientBoostingClassifier` | Sequential trees |
+| `random_forest` | `RandomForestClassifier` | Parallel ensemble |
+| `extra_trees` | `ExtraTreesClassifier` | Randomized splits |
+| `svm` | `SVC(probability=True)` | RBF kernel |
+| `mlp` | `MLPClassifier` | 128→64→32, early stopping |
+| `xgboost` | `XGBClassifier` | Optional, graceful skip |
+
+**Training sequence:**
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ 1. LOAD DATA                                                │
-│    Load from storage (JSON or Snowflake)                    │
-└────────────────┬────────────────────────────────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 2. PREPARE DATA                                             │
-│    Convert to (X, y) numpy arrays                           │
-└────────────────┬────────────────────────────────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 3. TRAIN-TEST SPLIT                                         │
-│    80% training, 20% testing (random_state=42)              │
-└────────────────┬────────────────────────────────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 4. TRAIN MULTIPLE MODELS                                    │
-│    ┌──────────────────────────────────────────────┐        │
-│    │ For each model in models:                    │        │
-│    │   • Initialize model                          │        │
-│    │   • Train: model.fit(X_train, y_train)       │        │
-│    │   • Predict: y_pred = model.predict(X_test)  │        │
-│    │   • Calculate metrics (accuracy, precision, recall, F1)│
-│    │   • Store results                            │        │
-│    └──────────────────────────────────────────────┘        │
-└────────────────┬────────────────────────────────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 5. SELECT BEST MODEL                                        │
-│    best = max(results, key=lambda k: results[k]['f1'])      │
-└────────────────┬────────────────────────────────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 6. SAVE ARTIFACTS                                           │
-│    • best_model.pkl (pickle serialization)                  │
-│    • model_info.json (metadata)                             │
-│    • model_comparison.json (all models' metrics)            │
-└─────────────────────────────────────────────────────────────┘
+1. load_data(storage)
+2. prepare_data(data) → X, y, feature_names
+3. train_test_split(stratify=y, test_size=0.2)
+4. For each model:
+   a. model.fit(X_train, y_train)
+   b. compute_metrics(model, X_test, y_test)
+      → accuracy, precision, recall, f1, roc_auc, confusion_matrix
+   c. get_feature_importances(model, feature_names)
+      → reads clf.feature_importances_ or abs(clf.coef_)
+   d. cross_val_score(model, X, y, cv=5, scoring="roc_auc")
+      → cv_roc_auc_mean, cv_roc_auc_std
+5. best = max by config selection_metric (default: roc_auc)
+6. Promote gate (if triggered_by != "manual"):
+   if new_auc < current_auc + promote_threshold → skip, log, return None
+7. register_model(best)
+8. Save comparison_vN.json + latest_comparison.json
+9. _append_log(result)
 ```
 
-**Models Compared:**
-
-1. **Logistic Regression**
-   - `max_iter=1000` (ensure convergence)
-   - `random_state=42` (reproducibility)
-
-2. **Random Forest**
-   - `n_estimators=100` (100 trees)
-   - `random_state=42` (reproducibility)
-
-3. **Linear Regression (Thresholded)**
-   - Default parameters
-   - Output ≥ 0.5 → class 1, else class 0
-
-**Model Selection Logic:**
-```python
-best_model_name = max(results, key=lambda k: results[k]['f1'])
-```
-F1-score balances precision and recall, making it ideal for binary classification.
+**`stratify=y`** in the train-test split ensures the home win ratio is preserved in both sets — important because real NCAA data has ~73% home win rate.
 
 ---
 
-### Layer 6: Model Persistence
+### Layer 6: Model Registry
 
-**Serialization:**
+**Functions:** `register_model`, `load_active_model`, `set_active_version`
 
-```python
-# Save model
-with open('best_model.pkl', 'wb') as f:
-    pickle.dump(best_model, f)
+**Registry file:** `models/registry.json`
 
-# Save metadata
-model_info = {
-    'model_name': best_model_name,
-    'accuracy': accuracy,
-    'precision': precision,
-    'recall': recall,
-    'f1': f1,
-    'trained_at': datetime.now().isoformat()
+```json
+{
+  "active_version": "v3",
+  "versions": [
+    {
+      "version": "v1",
+      "model_name": "Extra Trees",
+      "filename": "extra_trees_v1_a3f2c1d4.pkl",
+      "metrics": { "roc_auc": 0.9766, "f1": 0.9474, ... },
+      "feature_names": ["home_ppg", "away_ppg", ...],
+      "training_size": 400,
+      "trained_at": "2025-03-15T14:22:11",
+      "hash": "a3f2c1d4"
+    },
+    ...
+  ]
 }
-with open('model_info.json', 'w') as f:
-    json.dump(model_info, f, indent=2)
 ```
 
-**Files Created:**
+**Version numbering:** Sequential integer, prefixed `v`. Each version gets a short MD5 hash of the serialized model object for integrity.
 
-| File | Format | Contents |
-|------|--------|----------|
-| `best_model.pkl` | Binary (pickle) | Complete sklearn model object |
-| `model_info.json` | JSON | Metadata about selected model |
-| `model_comparison.json` | JSON | Metrics for all three models |
+**`.pkl` format:** Each file contains `{"model": pipeline_obj, "feature_names": list}`. Storing feature names with the model prevents silent mismatches if the feature list changes between versions.
+
+**Pruning:** When `len(versions) > keep_top_n` (default 10), oldest `.pkl` files are deleted from disk and their entries removed from the registry.
+
+**Rollback:** `set_active_version("v2")` simply updates `active_version` in the registry. The next `/predict` call loads that version's `.pkl`.
 
 ---
 
-### Layer 7: Flask Web Server
+### Layer 7: Learning Log
 
-**Function:** Flask app instance (lines 419-585)
+**File:** `data/learning_log.json`
 
-**Routes:**
+Every training run appends one entry — whether promoted or skipped:
 
+```json
+{
+  "timestamp": "2025-03-15T20:00:01",
+  "triggered_by": "new_data",
+  "result": "promoted",
+  "version": "v3",
+  "model_name": "Gradient Boosting",
+  "roc_auc": 0.9891,
+  "f1": 0.96,
+  "dataset_size": 500
+}
 ```
-GET  /              → dashboard.html
-POST /predict       → Make prediction
-GET  /model_info    → Get model metadata
-GET  /analytics     → Get dataset statistics
+
+```json
+{
+  "triggered_by": "scheduler",
+  "result": "skipped",
+  "reason": "New AUC 0.9812 vs current 0.9891 (threshold +0.002). Skipping.",
+  "new_auc": 0.9812,
+  "current_auc": 0.9891
+}
 ```
 
-**Server Architecture:**
-
-```
-Browser
-   │
-   │ HTTP Request
-   │
-   ▼
-Flask (@app.route)
-   │
-   ├─ Route: /
-   │  └─ send_file('dashboard.html')
-   │
-   ├─ Route: /predict (POST)
-   │  │
-   │  ├─ Load model (best_model.pkl)
-   │  ├─ Extract features from request
-   │  ├─ model.predict(features)
-   │  ├─ Calculate confidence
-   │  └─ Return JSON response
-   │
-   ├─ Route: /model_info (GET)
-   │  │
-   │  ├─ Load model_info.json
-   │  └─ Return as JSON
-   │
-   └─ Route: /analytics (GET)
-      │
-      ├─ Load data.json
-      ├─ Calculate statistics
-      ├─ Load model_comparison.json
-      └─ Return combined JSON
-```
+This log is what the Dashboard's **Auto-Learn tab** reads.
 
 ---
 
 ## 🚀 Command Execution Flows
 
-### Flow 1: `python main.py --generate --storage local`
-
-**Goal:** Create initial synthetic dataset
+### Flow 1: `python main.py --fetch`
 
 ```
 main()
   │
-  ├─ argparse parses: args.generate=True, args.storage='local'
-  │
-  ├─ Call generate_synthetic_data(500)
-  │   │
-  │   ├─ Loop 500 times:
-  │   │   │
-  │   │   ├─ Random features: U(65,95), U(0.4,0.55), etc.
-  │   │   │
-  │   │   ├─ Calculate strengths:
-  │   │   │   home_strength = home_ppg*0.3 + home_fg_pct*100 + ... + 3
-  │   │   │   away_strength = away_ppg*0.3 + away_fg_pct*100 + ...
-  │   │   │
-  │   │   ├─ Determine outcome:
-  │   │   │   if home_strength > away_strength:
-  │   │   │     outcome = 1 (85% prob) or 0 (15% prob)
-  │   │   │   else:
-  │   │   │     outcome = 0 (85% prob) or 1 (15% prob)
-  │   │   │
-  │   │   └─ Create game dict with 11 fields
-  │   │
-  │   └─ Return list of 500 games
-  │
-  ├─ Call save_to_json(data)
-  │   │
-  │   ├─ Open 'data.json' for writing
-  │   ├─ json.dump(data, f, indent=2)
-  │   └─ Close file
-  │
-  └─ Exit (status 0)
+  └─ fetch_ncaa_data(max_games=500)
+      │
+      ├─ ESPNFetcher.get_game_ids("20241101", "20250430")
+      │   └─ ~180 days × 25 games/day = thousands of IDs
+      │
+      └─ For each game_id (up to max_games):
+          │
+          ├─ ESPNFetcher.get_box_score(gid)
+          │   ├─ GET /summary?event=ID
+          │   ├─ Parse box_teams → home_d, away_d
+          │   ├─ Extract stats (FG%, rebounds, assists, turnovers, steals, blocks)
+          │   ├─ Normalize pct fields
+          │   ├─ Read scores → determine outcome
+          │   └─ Return game dict (14 features + metadata)
+          │
+          └─ append_to_json(games)
+              ├─ load_from_json() → existing games
+              ├─ Filter: keep only game_ids not already stored
+              └─ save_to_json(existing + new_unique)
 ```
-
-**Output:**
-- Console: "Generated 500 games. Saved 500 records to data.json."
-- File: `data.json` (approx 150 KB)
 
 ---
 
-### Flow 2: `python main.py --fetch-api --storage local`
-
-**Goal:** Append new season data
+### Flow 2: `python main.py --train`
 
 ```
 main()
   │
-  ├─ argparse parses: args.fetch_api=True, args.storage='local'
-  │
-  ├─ Call simulate_api_fetch(100)
-  │   │
-  │   └─ Call generate_synthetic_data(100)
-  │       └─ (Same process as --generate, but 100 games)
-  │
-  ├─ Call append_to_json(new_data)
-  │   │
-  │   ├─ Call load_from_json()
-  │   │   └─ Returns existing 500 games
-  │   │
-  │   ├─ Combine: existing_data + new_data → 600 games
-  │   │
-  │   └─ Call save_to_json(combined_data)
-  │       └─ Overwrites data.json with 600 games
-  │
-  └─ Exit
-```
-
-**Output:**
-- Console: "Fetched 100 new games. Appended 100 new records. Total: 600"
-- File: `data.json` (approx 180 KB)
-
----
-
-### Flow 3: `python main.py --train --storage local`
-
-**Goal:** Train models and select best
-
-```
-main()
-  │
-  ├─ argparse parses: args.train=True, args.storage='local'
-  │
-  └─ Call train_and_evaluate_models('local')
+  └─ train_and_evaluate("local", triggered_by="manual")
       │
-      ├─ Load data: load_from_json() → 600 games
+      ├─ load_from_json() → 500 game dicts
       │
-      ├─ Prepare data: prepare_data(data) → (X, y)
-      │   X.shape = (600, 10)
-      │   y.shape = (600,)
+      ├─ prepare_data(data)
+      │   ├─ Filter: only records with all 14 features present
+      │   ├─ X = np.array([[g[feat] for feat in cfg_features] for g in valid])
+      │   │   shape: (500, 14)
+      │   └─ y = np.array([g["outcome"] for g in valid])
+      │       shape: (500,)   ~73% ones (home wins)
       │
-      ├─ Train-test split (80/20):
-      │   X_train.shape = (480, 10)
-      │   X_test.shape = (120, 10)
+      ├─ train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+      │   X_train: (400, 14),  X_test: (100, 14)
       │
-      ├─ Initialize models:
-      │   models = {
-      │     'Logistic Regression': LogisticRegression(max_iter=1000, random_state=42),
-      │     'Random Forest': RandomForestClassifier(n_estimators=100, random_state=42),
-      │     'Linear Regression (Thresholded)': LinearRegression()
-      │   }
+      ├─ build_models() → 5-6 Pipeline objects
       │
       ├─ For each model:
-      │   │
-      │   ├─ model.fit(X_train, y_train)
-      │   │
-      │   ├─ y_pred = model.predict(X_test)
-      │   │   (Special handling for Linear Regression: threshold at 0.5)
-      │   │
-      │   ├─ Calculate metrics:
-      │   │   accuracy = accuracy_score(y_test, y_pred)
-      │   │   precision = precision_score(y_test, y_pred)
-      │   │   recall = recall_score(y_test, y_pred)
-      │   │   f1 = f1_score(y_test, y_pred)
-      │   │
-      │   ├─ Print metrics to console
-      │   │
-      │   └─ Store in results dict
+      │   ├─ Pipeline.fit(X_train, y_train)
+      │   │   (StandardScaler fits on X_train, transforms, then clf.fit)
+      │   ├─ compute_metrics(model, X_test, y_test)
+      │   ├─ get_feature_importances(model, feature_names)
+      │   └─ cross_val_score(model, X, y, cv=5, scoring="roc_auc")
       │
-      ├─ Select best model:
-      │   best_name = max(results, key=lambda k: results[k]['f1'])
-      │   best_model = results[best_name]['model']
+      ├─ best = max by roc_auc
       │
-      ├─ Save best model:
-      │   pickle.dump(best_model, open('best_model.pkl', 'wb'))
+      ├─ register_model(best_name, best_pipeline, metrics, features, 400)
+      │   ├─ Increment version number
+      │   ├─ Hash model bytes (MD5)
+      │   ├─ model_path.write_bytes(pickle.dumps({model, feature_names}))
+      │   ├─ Append entry to registry.json
+      │   └─ Prune old versions if > keep_top_n
       │
-      ├─ Save metadata:
-      │   json.dump(model_info, open('model_info.json', 'w'))
-      │   json.dump(comparison, open('model_comparison.json', 'w'))
+      ├─ _sanitize(snap) → json.dump → comparison_vN.json + latest_comparison.json
+      │   (_sanitize replaces NaN/Inf with None for valid JSON)
       │
-      └─ Exit
+      └─ _append_log(promoted entry)
 ```
-
-**Output:**
-- Console: Training progress, metrics for all models, best model announcement
-- Files: `best_model.pkl`, `model_info.json`, `model_comparison.json`
 
 ---
 
-### Flow 4: `python main.py --serve --storage local`
-
-**Goal:** Start prediction web server
+### Flow 3: `python main.py --serve`
 
 ```
 main()
   │
-  ├─ argparse parses: args.serve=True, args.storage='local'
+  ├─ _scheduler.start()
+  │   └─ daemon thread: AutoLearnScheduler._loop()
+  │       └─ time.sleep(60)  # wait for Flask to start
+  │           └─ [see Auto-Learning Pipeline section]
   │
-  ├─ Print startup banner
-  │
-  └─ app.run(debug=True, port=5000)
+  └─ app.run(debug=False, port=5000, use_reloader=False)
+      │        ↑
+      │   use_reloader=False prevents the scheduler from
+      │   starting twice in Flask's debug reload process
       │
-      └─ Flask starts listening on localhost:5000
-          │
-          └─ Wait for HTTP requests...
-              │
-              ├─ User visits http://localhost:5000
-              │  │
-              │  └─ Route: @app.route('/')
-              │      └─ return send_file('dashboard.html')
-              │
-              ├─ User POSTs to /predict
-              │  │
-              │  └─ Route: @app.route('/predict', methods=['POST'])
-              │      │
-              │      ├─ load_model() → (model, model_info)
-              │      │
-              │      ├─ Extract features from request.json (10 values)
-              │      │
-              │      ├─ features = np.array([[f1, f2, ..., f10]])
-              │      │
-              │      ├─ prediction = model.predict(features)
-              │      │
-              │      ├─ confidence = calculate_confidence(model, features)
-              │      │
-              │      └─ return jsonify({
-              │            'prediction': 'Home Win' or 'Away Win',
-              │            'confidence': 0.87,
-              │            'model_name': 'Random Forest'
-              │          })
-              │
-              ├─ User GETs /model_info
-              │  │
-              │  └─ Route: @app.route('/model_info', methods=['GET'])
-              │      │
-              │      ├─ load_model() → (model, model_info)
-              │      │
-              │      └─ return jsonify(model_info)
-              │
-              └─ User GETs /analytics
-                 │
-                 └─ Route: @app.route('/analytics', methods=['GET'])
-                     │
-                     ├─ Load data.json
-                     │
-                     ├─ Calculate statistics:
-                     │   • total_games
-                     │   • home_wins, away_wins
-                     │   • home_win_rate
-                     │   • feature_stats (grouped by outcome)
-                     │
-                     ├─ Load model_comparison.json
-                     │
-                     └─ return jsonify({
-                           'total_games': 600,
-                           'home_wins': 327,
-                           'away_wins': 273,
-                           'home_win_rate': 0.545,
-                           'feature_stats': {...},
-                           'model_comparison': {...}
-                         })
+      └─ Serving at http://localhost:5000
 ```
 
-**Server runs until Ctrl+C**
+---
+
+## 🤖 Auto-Learning Pipeline
+
+**Class:** `AutoLearnScheduler` — runs as a daemon thread.
+
+```
+_loop():
+  sleep(60)  ← let Flask initialize
+
+  while not stopped:
+    now = time.time()
+
+    if now - last_fetch >= fetch_interval (6h):
+      status = "fetching"
+      new_games = fetch_ncaa_data()
+      added = append_to_json(new_games)
+      last_fetch = now
+
+      if added >= min_new_games (15):
+        status = "training"
+        train_and_evaluate(triggered_by="new_data")
+        last_retrain = now
+
+    elif now - last_retrain >= retrain_interval (24h):
+      status = "training"
+      train_and_evaluate(triggered_by="scheduler")
+      last_retrain = now
+
+    status = "idle"
+    sleep in 60s chunks (checking stop event each time)
+```
+
+**Promote gate inside `train_and_evaluate` when `triggered_by != "manual"`:**
+
+```
+new_auc = best_model.metrics["roc_auc"]
+current_auc = active_entry.metrics["roc_auc"]
+
+if new_auc >= current_auc + promote_threshold:
+    register_model() → new active version
+    log: { result: "promoted" }
+else:
+    log: { result: "skipped", reason: "..." }
+    return None  ← no version change
+```
+
+This means the active model is immutable unless something genuinely better emerges.
 
 ---
 
@@ -574,359 +433,180 @@ main()
 ### End-to-End Prediction Flow
 
 ```
-User Opens Browser
-        │
-        │ HTTP GET /
-        │
-        ▼
-Flask: send_file('dashboard.html')
-        │
-        ▼
-Browser Renders HTML
-        │
-        ├─────────────────────┐
-        │                     │
-        ▼                     ▼
-JavaScript Calls       User Fills Form
-GET /model_info       (10 feature inputs)
-GET /analytics              │
-        │                   │
-        ▼                   ▼
-Display Charts        User Clicks "Predict"
-                            │
-                            │ HTTP POST /predict
-                            │ Body: { home_ppg: 82.5, ... }
-                            │
-                            ▼
-Flask: @app.route('/predict')
-        │
-        ├─ Load: best_model.pkl
-        │
-        ├─ Extract: 10 feature values
-        │
-        ├─ Create: np.array([[f1, f2, ..., f10]])
-        │
-        ├─ Predict: model.predict(features)
-        │
-        ├─ Calculate: confidence score
-        │
-        └─ Return: JSON response
-                │
-                ▼
-Browser Receives JSON
-        │
-        ▼
-JavaScript Updates DOM
-        │
-        ├─ Show prediction ("Home Win")
-        ├─ Show confidence (87%)
-        ├─ Apply styling (green/red)
-        └─ Display model name
+User opens http://localhost:5000
+  │
+  └─ Flask: send_file("dashboard.html")
+      │
+      └─ Browser executes JS init():
+          │
+          ├─ fetch("/features")     → feature list from config
+          ├─ fetch("/home_team")    → Duke stats from season averages
+          ├─ fetch("/teams")        → all teams dropdown
+          ├─ fetch("/model_info")   → active version + metrics
+          ├─ fetch("/analytics")    → stats + comparison + feature importances
+          ├─ fetch("/registry")     → all versions for Registry tab
+          ├─ fetch("/autolearn/status") → scheduler state
+          └─ fetch("/learning_log") → training history
+
+User selects away team from dropdown
+  │
+  └─ onAwayTeamChange()
+      └─ fetch("/team_stats/Kansas Jayhawks")
+          └─ build_team_stats(data) → away team season averages
+              └─ Auto-fill away stat fields (green border)
+
+User clicks "Predict"
+  │
+  └─ POST /predict  { home_ppg: 84.3, away_ppg: 72.1, ... }
+      │
+      ├─ load_active_model()
+      │   └─ registry.json → active_version → load .pkl
+      │       └─ payload = { model: Pipeline, feature_names: [...] }
+      │
+      ├─ X = np.array([[payload[f] for f in feature_names]])
+      │
+      ├─ pred = model.predict(X)[0]
+      │   (Pipeline: StandardScaler.transform → clf.predict)
+      │
+      ├─ conf = max(model.predict_proba(X)[0])
+      │
+      └─ return { prediction, confidence, model_name, version }
 ```
 
 ---
 
 ## 💾 Storage Architecture
 
-### Local Storage (JSON)
+### Local JSON
 
-**File:** `data.json`
+**File:** `data/games.json`
 
-**Structure:**
+**Record structure:**
 ```json
-[
-  {
-    "game_id": "GAME_0001",
-    "home_ppg": 78.45,
-    "away_ppg": 72.31,
-    "home_fg_pct": 0.478,
-    "away_fg_pct": 0.441,
-    "home_rebounds": 38.20,
-    "away_rebounds": 35.67,
-    "home_assists": 18.90,
-    "away_assists": 16.45,
-    "home_turnovers": 12.30,
-    "away_turnovers": 14.20,
-    "outcome": 1
-  },
-  ...
-]
+{
+  "game_id": "ESPN_401703521",
+  "home_team": "Duke Blue Devils",
+  "away_team": "Kansas Jayhawks",
+  "home_score": 84,
+  "away_score": 72,
+  "home_ppg": 84.0,
+  "away_ppg": 72.0,
+  "home_fg_pct": 0.4921,
+  "away_fg_pct": 0.3854,
+  "home_rebounds": 39.0,
+  "away_rebounds": 31.0,
+  "home_assists": 17.0,
+  "away_assists": 11.0,
+  "home_turnovers": 11.0,
+  "away_turnovers": 14.0,
+  "home_steals": 8.0,
+  "away_steals": 6.0,
+  "home_blocks": 5.0,
+  "away_blocks": 3.0,
+  "outcome": 1,
+  "source": "espn",
+  "fetched_at": "2025-03-15T14:00:00"
+}
 ```
 
-**Operations:**
-- **Create:** `json.dump(data, file)`
-- **Read:** `json.load(file)`
-- **Append:** Load → Extend → Save
+**Deduplication:** `append_to_json` builds a set of existing `game_id` values and filters new data against it before writing. Same game can never appear twice regardless of how many times `--fetch` is run.
 
-**Pros:**
-- Simple, no dependencies
-- Human-readable
-- Version-control friendly
+### Snowflake (Optional)
 
-**Cons:**
-- Not scalable to millions of records
-- No query optimization
-- Must load entire file
+Schema auto-created from `DATA_CFG["features"]` list — adding a feature to config automatically adds it to the CREATE TABLE statement. Credentials read exclusively from environment variables.
 
 ---
 
-### Cloud Storage (Snowflake)
+## 🎯 Model Training Pipeline Detail
 
-**Table:** `BASKETBALL_GAMES`
+### Why ROC-AUC as Selection Metric
 
-**Schema:**
-```sql
-CREATE TABLE BASKETBALL_GAMES (
-    game_id VARCHAR(50),
-    home_ppg FLOAT,
-    away_ppg FLOAT,
-    home_fg_pct FLOAT,
-    away_fg_pct FLOAT,
-    home_rebounds FLOAT,
-    away_rebounds FLOAT,
-    home_assists FLOAT,
-    away_assists FLOAT,
-    home_turnovers FLOAT,
-    away_turnovers FLOAT,
-    outcome INT
-);
-```
+ROC-AUC measures the model's ability to rank home wins above away wins across all decision thresholds — it's threshold-independent. With ~73% home win rate in real NCAA data, accuracy alone would reward a model that just predicts "Home Win" every time. ROC-AUC penalizes this. Configurable to `f1`, `accuracy`, etc. in `config.yaml`.
 
-**Operations:**
-- **Create:** `INSERT INTO ... VALUES (...)`
-- **Read:** `SELECT * FROM BASKETBALL_GAMES`
-- **Append:** `INSERT INTO ... VALUES (...)` (additional rows)
+### Why Stratified Split
 
-**Pros:**
-- Scalable to millions of records
-- SQL query capabilities
-- Cloud-accessible
-- Production-grade
+The real ESPN data has ~73% home wins. Without `stratify=y`, a random 20% test set might have 80% or 65% home wins by chance — making evaluation unstable. Stratification guarantees the test set mirrors the full dataset's class distribution.
 
-**Cons:**
-- Requires Snowflake account
-- Credentials management
-- Network dependency
+### Why Pipeline (Scaler + Estimator)
+
+SVM and MLP are sensitive to feature scale — `home_ppg` (range 60-95) and `home_fg_pct` (range 0.38-0.55) are on completely different scales. Wrapping in a Pipeline means the scaler is trained only on `X_train`, then applied to `X_test` — no data leakage. The entire Pipeline is pickled as one object, so loading a model version automatically gets the correct scaler.
+
+### NaN Sanitization
+
+XGBoost's cross-validation occasionally returns `NaN` when it cannot compute a CV score (e.g. label imbalance in a fold). Python's `json.dumps` writes `NaN` literally — which is invalid JSON spec and causes `JSON.parse` to throw in the browser. `_sanitize(obj)` recursively replaces any `float('nan')` or `float('inf')` with `None` before serialization.
 
 ---
 
-## 🎯 Model Training Pipeline
+## 🌐 API Reference
 
-### Training Sequence Diagram
-
-```
-┌──────┐      ┌──────────┐      ┌─────────┐      ┌───────┐
-│ Data │      │ Feature  │      │  Train  │      │ Save  │
-│ Load │─────▶│ Engineer │─────▶│  Models │─────▶│ Best  │
-└──────┘      └──────────┘      └─────────┘      └───────┘
-   │              │                   │               │
-   │              │                   │               │
-   ▼              ▼                   ▼               ▼
-Storage       (X, y)           3 Trained         .pkl + .json
-(JSON/SQL)    arrays            Models            files
-```
-
-### Detailed Training Steps
-
-**Step 1: Data Loading**
-```python
-if storage_mode == 'local':
-    data = load_from_json()  # List of dicts
-else:
-    data = load_from_snowflake()  # List of dicts
-```
-
-**Step 2: Feature Engineering**
-```python
-X, y = prepare_data(data)
-# X: (n_games, 10) - feature matrix
-# y: (n_games,) - outcome labels
-```
-
-**Step 3: Train-Test Split**
-```python
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42
-)
-# 80% training, 20% testing
-# random_state ensures reproducibility
-```
-
-**Step 4: Model Training Loop**
-```python
-for model_name, model in models.items():
-    # Train
-    model.fit(X_train, y_train)
-    
-    # Predict
-    y_pred = model.predict(X_test)
-    
-    # Evaluate
-    metrics = calculate_metrics(y_test, y_pred)
-    
-    # Store
-    results[model_name] = {'model': model, **metrics}
-```
-
-**Step 5: Model Selection**
-```python
-best_model_name = max(results, key=lambda k: results[k]['f1'])
-best_model = results[best_model_name]['model']
-```
-
-**Step 6: Persistence**
-```python
-pickle.dump(best_model, open('best_model.pkl', 'wb'))
-json.dump(model_info, open('model_info.json', 'w'))
-json.dump(comparison, open('model_comparison.json', 'w'))
-```
-
----
-
-## 🌐 Prediction Serving
-
-### Flask Route Handlers
-
-**Route: `/predict`**
-
-```python
-@app.route('/predict', methods=['POST'])
-def predict():
-    # 1. Load model
-    model, model_info = load_model()
-    
-    # 2. Extract features from request
-    data = request.json
-    features = [
-        float(data['home_ppg']),
-        float(data['away_ppg']),
-        # ... (10 features)
-    ]
-    
-    # 3. Create numpy array
-    X = np.array([features])
-    
-    # 4. Make prediction
-    if 'Linear Regression' in model_info['model_name']:
-        # Threshold continuous output
-        output = model.predict(X)[0]
-        prediction = int(output >= 0.5)
-        confidence = abs(output - 0.5) * 2
-    else:
-        # Direct classification
-        prediction = int(model.predict(X)[0])
-        if hasattr(model, 'predict_proba'):
-            proba = model.predict_proba(X)[0]
-            confidence = float(max(proba))
-        else:
-            confidence = None
-    
-    # 5. Format response
-    result = {
-        'prediction': 'Home Win' if prediction == 1 else 'Away Win',
-        'confidence': confidence,
-        'model_name': model_info['model_name']
-    }
-    
-    return jsonify(result)
-```
+| Method | Endpoint | Returns |
+|--------|----------|---------|
+| GET | `/` | `dashboard.html` |
+| POST | `/predict` | prediction, confidence, version |
+| GET | `/analytics` | games stats, model comparison, feature importances |
+| GET | `/model_info` | active model entry from registry |
+| GET | `/registry` | full registry JSON |
+| POST | `/registry/activate/<v>` | `{status: ok}` |
+| GET | `/features` | feature list from config |
+| GET | `/teams` | all teams with season averages |
+| GET | `/team_stats/<name>` | single team stats (fuzzy match) |
+| GET | `/home_team` | configured home team + stats |
+| GET | `/autolearn/status` | scheduler state + countdowns |
+| POST | `/autolearn/trigger` | starts background retrain |
+| GET | `/learning_log?n=50` | last N log entries |
+| GET | `/debug` | health check (paths, counts, active model) |
 
 ---
 
 ## 🎨 Dashboard Integration
 
-### Dashboard Loading Sequence
+### Tab Rendering Strategy
+
+Charts are not drawn on page load — they are drawn fresh each time a tab becomes visible via `switchTab()`. This solves the Chart.js 0×0 canvas problem: hidden `display:none` tabs have no dimensions at render time.
 
 ```
-Page Load
-    │
-    ├─ HTML/CSS renders structure
-    │
-    └─ JavaScript executes
-        │
-        ├─ Call loadModelInfo()
-        │   │
-        │   └─ fetch('/model_info')
-        │       │
-        │       └─ Display current model name
-        │
-        └─ Call loadAnalytics()
-            │
-            └─ fetch('/analytics')
-                │
-                ├─ Display stats (total games, win rate)
-                │
-                ├─ Create model comparison chart (Chart.js)
-                │
-                ├─ Create outcome distribution chart
-                │
-                └─ Create feature analysis chart
+switchTab(name)
+  │
+  ├─ Remove .active from all tabs and panes
+  ├─ Add .active to selected pane
+  │
+  └─ requestAnimationFrame(() => {
+        if name == "overview":
+            drawOutcomeChart()   // uses analyticsData
+            drawRadar()          // uses model_comparison
+            drawProgressChart()  // uses registryData
+        elif name == "comparison":
+            drawComparisonCharts()   // grouped bar + multi-radar
+            buildComparisonTable()   // metric bars table
+        elif name == "features":
+            drawFeatureChart()   // home_win vs away_win averages
+            buildFiSelector()    // dropdown + importance bar chart
+    })
 ```
 
-### User Interaction Flow
+`requestAnimationFrame` defers execution by one paint cycle, ensuring the browser has applied `display:block` before Chart.js measures the canvas.
 
-```
-User Fills Form (10 inputs)
-    │
-    └─ User clicks "Predict" button
-        │
-        └─ JavaScript: form submit event
-            │
-            ├─ Collect form data
-            │
-            ├─ Show loading indicator
-            │
-            └─ fetch('/predict', {method: 'POST', body: formData})
-                │
-                └─ Response received
-                    │
-                    ├─ Hide loading indicator
-                    │
-                    └─ Display prediction result
-                        │
-                        ├─ Prediction text ("Home Win")
-                        ├─ Confidence (87%)
-                        ├─ Model name
-                        └─ Color styling (green/red)
-```
+### Data Separation
+
+`loadAnalytics()` fetches data and updates stat cards (plain DOM — always safe). It does **not** draw charts. Charts are drawn by `switchTab()` only when their canvas is visible and has real pixel dimensions. This separation means a slow analytics fetch never blocks tab switching.
 
 ---
 
-## 🔧 Error Handling
+## 🔧 Key Design Decisions
 
-### Storage Layer
-```python
-if not os.path.exists(filename):
-    print(f"File {filename} not found.")
-    return []
-```
-
-### Model Loading
-```python
-if model is None:
-    return jsonify({'error': 'No trained model found'}), 400
-```
-
-### Prediction
-```python
-try:
-    features = extract_features(request.json)
-    prediction = model.predict(features)
-except Exception as e:
-    return jsonify({'error': str(e)}), 400
-```
+| Decision | Rationale |
+|----------|-----------|
+| Config-driven via YAML | No secrets or tunables in Python source |
+| ROC-AUC for model selection | Robust to class imbalance (~73% home wins) |
+| Stratified train-test split | Preserves class ratio in both sets |
+| Pipeline (Scaler + clf) | Scaler trained on train set only; no leakage |
+| Model versioning with hash | Detects model file corruption |
+| Promote threshold | Prevents model regression from noise |
+| `use_reloader=False` | Prevents scheduler starting twice in Flask debug |
+| `_sanitize()` before JSON | XGBoost CV can return NaN; invalid JSON crashes browser |
+| Lazy chart rendering | Chart.js cannot render into 0×0 hidden canvases |
+| game_id deduplication | Safe to run `--fetch` multiple times |
 
 ---
 
-## 📊 Key Design Decisions
-
-1. **Single Script:** Simplicity over modularity (for project scale)
-2. **Fixed Random Seed:** Reproducibility over randomness
-3. **F1-Score Selection:** Balance over single metric
-4. **80/20 Split:** Standard practice, no cross-validation (yet)
-5. **Pickle Serialization:** Standard sklearn approach
-6. **Flask Debug Mode:** Development convenience
-
----
-
-*This document provides a complete technical reference for understanding how the system operates at every level.*
+*This document provides a complete technical reference for understanding how the system operates at every level, from config loading to chart rendering.*
