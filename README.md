@@ -35,7 +35,7 @@ This project implements a complete machine learning system for predicting NCAA b
 - **Auto-learning scheduler** that fetches, retrains, and promotes improvements automatically
 - **Home-team-centric predictions** with season-average auto-fill
 - **Interactive multi-tab dashboard** for predictions, analytics, and model history
-- **Config-driven architecture** — no hardcoded values anywhere
+- **Config-driven architecture**, no hardcoded values anywhere
 
 ---
 
