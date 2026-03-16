@@ -1,0 +1,167 @@
+app:
+  name: "Basketball Game Outcome Predictor"
+  version: "2.1.0"
+  debug: true
+  port: 5000
+  host: "0.0.0.0"
+
+
+# HOME TEAM — the team this instance "roots for"
+# All predictions are framed as: home_team vs <chosen opponent>
+# Stats are auto-filled from their season averages in the dataset
+
+home_team:
+  name: "Duke Blue Devils"       # Change to your team
+  espn_id: "150"                 # ESPN team ID (150 = Duke). Used for direct team lookups.
+  court_name: "Cameron Indoor Stadium"
+
+
+# AUTO-LEARNING SCHEDULER
+# Runs in the background when --serve is active.
+# Fetches new games → retrains → promotes only if model improves.
+
+auto_learn:
+  enabled: true
+  fetch_interval_hours: 6        # How often to check for new games
+  retrain_interval_hours: 24     # How often to force a full retrain (even without new data)
+  min_new_games_to_retrain: 15   # Minimum new games required to trigger a retrain
+  promote_threshold: 0.002       # New model must beat current by this much (ROC-AUC) to be promoted
+  learning_log_file: "data/learning_log.json"
+
+
+# DATA STORAGE
+
+data:
+  dir: "data"
+  local_file: "data/games.json"
+  test_size: 0.2
+  random_state: 42
+  min_games_required: 50
+
+  # Feature columns used for training (order matters)
+  features:
+    - home_ppg
+    - away_ppg
+    - home_fg_pct
+    - away_fg_pct
+    - home_rebounds
+    - away_rebounds
+    - home_assists
+    - away_assists
+    - home_turnovers
+    - away_turnovers
+    - home_steals
+    - away_steals
+    - home_blocks
+    - away_blocks
+
+  # Label column
+  label: "outcome"
+
+
+# NCAA API — ESPN (no key required, unofficial)
+# Switch provider to "custom" and fill custom block for your own API
+
+ncaa_api:
+  provider: "espn"           # espn | custom
+  season: 2024               # Academic year start (2024 = 2024-25 season)
+  max_games: 500             # Cap on games fetched per run
+  rate_limit_delay: 0.4      # Seconds between requests (be polite)
+
+  espn:
+    base_url: "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball"
+    scoreboard_path: "/scoreboard"
+    summary_path: "/summary"
+    page_size: 25
+
+  # Fill this block when using your own API
+  custom:
+    base_url: ""             # e.g. https://api.mystatsprovider.com/v1
+    api_key: ""              # or set env var NCAA_API_KEY
+    games_endpoint: "/games"
+    season_param: "season"
+    # Field mapping: our_field -> their_field
+    field_map:
+      game_id: "id"
+      home_team: "home_team"
+      away_team: "away_team"
+      home_score: "home_score"
+      away_score: "away_score"
+
+
+# SNOWFLAKE  (keep disabled until credentials are available)
+# Set env vars SNOWFLAKE_USER / SNOWFLAKE_PASSWORD for safety
+
+snowflake:
+  enabled: false
+  user: ""                   # or env SNOWFLAKE_USER
+  password: ""               # or env SNOWFLAKE_PASSWORD
+  account: ""
+  warehouse: ""
+  database: ""
+  schema: ""
+  table: "BASKETBALL_GAMES"
+
+# MODEL REGISTRY & VERSIONING
+
+models:
+  dir: "models"
+  registry_file: "models/registry.json"
+  selection_metric: "roc_auc"  # accuracy | f1 | precision | recall | roc_auc
+  keep_top_n: 10               # Max versions kept in registry before pruning
+
+  # Toggle which models participate in each training run
+  enabled:
+    - gradient_boosting
+    - random_forest
+    - extra_trees
+    - svm
+    - mlp
+    - xgboost            # Skipped gracefully if xgboost not installed
+
+  # Per-model hyperparameters
+  gradient_boosting:
+    n_estimators: 200
+    learning_rate: 0.05
+    max_depth: 4
+    subsample: 0.8
+    min_samples_split: 5
+    random_state: 42
+
+  random_forest:
+    n_estimators: 200
+    max_depth: 12
+    min_samples_split: 5
+    min_samples_leaf: 2
+    random_state: 42
+
+  extra_trees:
+    n_estimators: 200
+    max_depth: 12
+    min_samples_split: 5
+    random_state: 42
+
+  svm:
+    kernel: "rbf"
+    C: 1.0
+    gamma: "scale"
+    probability: true
+    random_state: 42
+
+  mlp:
+    hidden_layer_sizes: [128, 64, 32]
+    activation: "relu"
+    max_iter: 500
+    early_stopping: true
+    validation_fraction: 0.1
+    random_state: 42
+
+  xgboost:
+    n_estimators: 200
+    learning_rate: 0.05
+    max_depth: 4
+    subsample: 0.8
+    colsample_bytree: 0.8
+    use_label_encoder: false
+    eval_metric: "logloss"
+    random_state: 42
