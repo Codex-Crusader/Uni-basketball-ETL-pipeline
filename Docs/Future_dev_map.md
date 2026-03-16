@@ -220,7 +220,6 @@ This is explicitly not needed for academic demonstration but documents the gap b
 These remain explicitly out of scope for the same reasons as the original roadmap:
 
 - ❌ Deep learning models — dataset size does not justify it
-- ❌ Real-time live game predictions — requires a streaming data source
 - ❌ Mobile app — separate project
 - ❌ User authentication — not needed for demo
 - ❌ GraphQL API — REST is sufficient
