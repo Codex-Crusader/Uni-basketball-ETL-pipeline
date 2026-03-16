@@ -1,47 +1,55 @@
-# 🏀 University Basketball Outcome Predictor
+# 🏀 NCAA Basketball Outcome Predictor
 
 > *An end-to-end machine learning pipeline demonstrating production-ready ML engineering practices*
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
-[![Flask](https://img.shields.io/badge/Flask-3.0.0-green.svg)](https://flask.palletsprojects.com/)
-[![scikit--learn](https://img.shields.io/badge/scikit--learn-1.3.2-orange.svg)](https://scikit-learn.org/)
+[![Flask](https://img.shields.io/badge/Flask-3.1.2-green.svg)](https://flask.palletsprojects.com/)
+[![scikit--learn](https://img.shields.io/badge/scikit--learn-1.8.0-orange.svg)](https://scikit-learn.org/)
 ![Full Marks or Else](https://img.shields.io/badge/Grade-Full%20Marks%20or%20Else%20🔫-red)
 ![Full Marks in Exchange for Puppy](https://img.shields.io/badge/Deal-Full%20Marks%20for%20a%20Puppy-ff69b4)
 
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/9f092cb4-afaa-4475-8682-af2f6bc7a819" width="48%" />
-  <img src="https://github.com/user-attachments/assets/2b897a19-4bb6-43e7-b7eb-5a69a12edeb3" width="48%" />
-</p>
+<details>
+<summary>View Dashboard Screenshots</summary>
+
+![Dashboard 1](images/dashboard_1.png)
+![Dashboard 2](images/dashboard_2.png)
+![Dashboard 3](images/dashboard_3.png)
+![Dashboard 4](images/dashboard_4.png)
+![Dashboard 5](images/dashboard_5.png)
+![Dashboard 6](images/dashboard_6.png)
+</details>
 
 ---
 
 ## 📋 Overview
 
-This project implements a complete machine learning system for predicting university basketball game outcomes (Home Win vs Away Win). The focus is on **ML engineering best practices** - building a maintainable, updateable system rather than just achieving high model accuracy.
+This project implements a complete machine learning system for predicting NCAA basketball game outcomes (Home Win vs Away Win). The focus is on **ML engineering best practices** — building a maintainable, self-improving system rather than just training a model once and calling it done.
 
 ### What This Project Demonstrates
 
+- **Real NCAA data** via ESPN's unofficial API (no key required)
 - **Script-based ML workflow** (no Jupyter notebooks)
-- **SQL database storage** (Snowflake for cloud, local JSON for development)
-- **Automated model selection** from multiple algorithms
-- **Production-ready serving** via Flask web server
-- **Interactive dashboard** for predictions and analytics
-- **Model lifecycle management** (training, updating, versioning)
-- **Version control ready** with clean commit history
+- **SQL database storage** (Snowflake provisioned; local JSON for development)
+- **6-model automated comparison** with ROC-AUC selection and 5-fold cross-validation
+- **Model versioning registry** with rollback support
+- **Auto-learning scheduler** that fetches, retrains, and promotes improvements automatically
+- **Home-team-centric predictions** with season-average auto-fill
+- **Interactive multi-tab dashboard** for predictions, analytics, and model history
+- **Config-driven architecture** — no hardcoded values anywhere
 
 ---
 
 ## 🎯 Problem Statement
 
-University sports programs need quick, data-driven predictions to support decision-making by coaches and analysts. This system provides:
+NCAA programs need quick, data-driven predictions to support decision-making. This system provides:
 
-1. A reproducible training pipeline
-2. Multiple model comparison and automatic selection
-3. Easy-to-use prediction interface
-4. Support for periodic retraining with new data
-5. Analytics dashboard for data exploration
+1. A reproducible, automated training pipeline
+2. Six-model comparison with automatic best-model selection
+3. Easy-to-use prediction interface with team stats auto-filled
+4. Continuous self-improvement as new game data arrives
+5. Full analytics dashboard including feature importance and model progression over time
 
-**Key Focus:** Engineering a system that can be maintained and updated over time, not just training a model once.
+**Key Focus:** Engineering a system that improves itself over time, not just one that trains once.
 
 ---
 
@@ -56,86 +64,87 @@ University sports programs need quick, data-driven predictions to support decisi
         ┌────────────┼────────────┬─────────────┐
         │            │            │             │
         ▼            ▼            ▼             ▼
-   [Generate]   [Fetch API]  [Train]       [Serve]
-        │            │            │             │
-        ▼            ▼            │             │
-┌──────────────────────────┐     │             │
-│   Data Generation        │     │             │
-│   • Synthetic games      │─────┘             │
-│   • Feature extraction   │                   │
-└────────────┬─────────────┘                   │
-             │                                 │
-             ▼                                 │
-┌──────────────────────────┐                   │
-│   Storage Layer          │                   │
-│   • Snowflake (SQL)      │                   │
-│   • Local JSON (dev)     │                   │
-└────────────┬─────────────┘                   │
-             │                                 │
-             ▼                                 │
-┌──────────────────────────┐                   │
-│   Model Training         │                   │
-│   • 3 models compared    │                   │
-│   • Best model selected  │                   │
-│   • Metrics saved        │                   │
-└────────────┬─────────────┘                   │
-             │                                 │
-             └─────────────────────────────────┤
-                                               │
-                                               ▼
-                                 ┌──────────────────────────┐
-                                 │   Flask Web Server       │
-                                 │   • Prediction API       │
-                                 │   • Analytics API        │
-                                 │   • Dashboard UI         │
-                                 └──────────────────────────┘
+  [--fetch]  [--generate-  [--train]       [--serve]
+              synthetic]        │             │
+        │            │          │             │
+        ▼            ▼          │             ▼
+┌──────────────────────────┐   │    ┌─────────────────────┐
+│   Data Ingestion         │   │    │  Auto-Learn         │
+│   • ESPN API (real data) │───┘    │  Scheduler          │
+│   • Synthetic fallback   │        │  (background thread)│
+│   • De-duplication       │        │  fetch → retrain    │
+└────────────┬─────────────┘        │  → promote if AUC ↑ │
+             │                      └─────────────────────┘
+             ▼
+┌──────────────────────────┐
+│   Storage Layer          │
+│   • Local JSON (default) │
+│   • Snowflake (optional) │
+└────────────┬─────────────┘
+             │
+             ▼
+┌──────────────────────────┐
+│   Training Pipeline      │
+│   • 6 models compared    │
+│   • 5-fold CV each       │
+│   • Best by ROC-AUC      │
+│   • Version registered   │
+└────────────┬─────────────┘
+             │
+             ▼
+┌──────────────────────────┐
+│   Model Registry         │
+│   • Versioned .pkl files │
+│   • Activate/rollback    │
+│   • Promote threshold    │
+└────────────┬─────────────┘
+             │
+             ▼
+┌──────────────────────────┐
+│   Flask Web Server       │
+│   • Prediction API       │
+│   • Analytics API        │
+│   • Team stats API       │
+│   • Multi-tab Dashboard  │
+└──────────────────────────┘
 ```
 
 ---
 
 ## 🧠 Machine Learning Models
 
-The system trains and compares **three traditional ML models**:
+The system trains and compares **six models** every run:
 
-### 1. Logistic Regression
-**Purpose:** Baseline classifier  
-**Strengths:** Fast, interpretable, good for linearly separable data  
-**Use Case:** Establishing performance floor
+| Model | Notes |
+|-------|-------|
+| **Gradient Boosting** | Sequential trees, strong on tabular data |
+| **Random Forest** | Parallel ensemble, reliable feature importances |
+| **Extra Trees** | Extra randomness reduces overfitting on smaller sets |
+| **SVM (RBF kernel)** | Strong margin classifier, needs StandardScaler |
+| **Neural Network (MLP)** | 128→64→32, ReLU, early stopping |
+| **XGBoost** | Optional — install with `pip install xgboost` |
 
-### 2. Random Forest Classifier
-**Purpose:** Ensemble model for non-linear patterns  
-**Strengths:** Handles feature interactions, robust to overfitting  
-**Use Case:** Typically the best performer
+All models are wrapped in a `StandardScaler → estimator` Pipeline so scaling is handled correctly for every model automatically.
 
-### 3. Linear Regression (Thresholded)
-**Purpose:** Regression adapted to classification  
-**Strengths:** Provides continuous confidence scores  
-**Use Case:** Demonstrates regression-to-classification conversion
-
-**Model Selection:** The system automatically selects the best model based on **F1-score** (harmonic mean of precision and recall).
+**Model Selection:** Best **ROC-AUC** from 5-fold cross-validation. Configurable in `config.yaml`.
 
 ---
 
 ## 📊 Features Used for Prediction
 
-Each game is represented by **10 statistical features**:
+Each game is represented by **14 statistical features** pulled directly from ESPN box scores:
 
-| Feature | Description | Range |
-|---------|-------------|-------|
-| `home_ppg` | Home team points per game | 65-95 |
-| `away_ppg` | Away team points per game | 65-95 |
-| `home_fg_pct` | Home team field goal percentage | 0.40-0.55 |
-| `away_fg_pct` | Away team field goal percentage | 0.40-0.55 |
-| `home_rebounds` | Home team rebounds per game | 30-50 |
-| `away_rebounds` | Away team rebounds per game | 30-50 |
-| `home_assists` | Home team assists per game | 12-25 |
-| `away_assists` | Away team assists per game | 12-25 |
-| `home_turnovers` | Home team turnovers per game | 8-18 |
-| `away_turnovers` | Away team turnovers per game | 8-18 |
+| Feature | Description |
+|---------|-------------|
+| `home_ppg` / `away_ppg` | Points scored that game |
+| `home_fg_pct` / `away_fg_pct` | Field goal percentage |
+| `home_rebounds` / `away_rebounds` | Total rebounds |
+| `home_assists` / `away_assists` | Assists |
+| `home_turnovers` / `away_turnovers` | Turnovers |
+| `home_steals` / `away_steals` | Steals |
+| `home_blocks` / `away_blocks` | Blocks |
 
-**Outcome:** Binary classification (1 = Home Win, 0 = Away Win)
-
-See `Docs/variable_list.md` for detailed feature descriptions.
+**Outcome:** Binary classification — `1` = Home Win, `0` = Away Win
 
 ---
 
@@ -143,127 +152,110 @@ See `Docs/variable_list.md` for detailed feature descriptions.
 
 ### Prerequisites
 
-- Python 3.8 or higher
-- pip package manager
-- (Optional) Snowflake account for SQL storage
+- Python 3.8+
+- pip
 
 ### Installation
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
+```
 
-# Verify installation
-python main.py --help
+### Optional
+
+```bash
+pip install xgboost                        # adds a 6th model
+pip install snowflake-connector-python     # only if using Snowflake
 ```
 
 ---
 
 ## 📖 Usage Guide
 
-### Initial Setup (First Time)
+### Standard Workflow
 
 ```bash
-# Step 1: Generate synthetic dataset
-python main.py --generate --storage local
+# Step 1: Fetch real NCAA data from ESPN (~500 games, takes 5-15 min)
+python main.py --fetch
 
-# Step 2: Train models and select best
-python main.py --train --storage local
+# If ESPN is slow or unavailable, use synthetic data instead:
+python main.py --generate-synthetic
 
-# Step 3: Start prediction server
-python main.py --serve --storage local
+# Step 2: Train all models and register the best one
+python main.py --train
+
+# Step 3: Start the server (auto-learn scheduler starts automatically)
+python main.py --serve
 ```
 
-**Access dashboard:** http://localhost:5000
+Open **http://localhost:5000**
 
 ---
 
-### Command Reference
+### Full Command Reference
 
-#### Generate Initial Data
-```bash
-python main.py --generate --storage local
-```
-Creates 500 synthetic basketball games with realistic statistics.
-
-#### Simulate New Season Data
-```bash
-python main.py --fetch-api --storage local
-```
-Generates 100 additional games (simulates API fetch) and appends to existing data.
-
-#### Train Models
-```bash
-python main.py --train --storage local
-```
-Trains all three models, evaluates performance, selects and saves the best model.
-
-**Output files:**
-- `best_model.pkl` - Serialized best model
-- `model_info.json` - Model metadata and metrics
-- `model_comparison.json` - Performance comparison of all models
-
-#### Start Web Server
-```bash
-python main.py --serve --storage local
-```
-Starts Flask server on port 5000 with:
-- Interactive prediction dashboard
-- REST API endpoints
-- Real-time analytics
+| Command | Description |
+|---------|-------------|
+| `--fetch` | Fetch real NCAA games from ESPN API |
+| `--generate-synthetic` | Generate 500 synthetic games (offline fallback) |
+| `--train` | Train all models, register best by ROC-AUC |
+| `--serve` | Start Flask server + auto-learn scheduler |
+| `--list-models` | Print all registered model versions |
+| `--activate v3` | Set a specific version as active |
+| `--storage snowflake` | Use Snowflake instead of local JSON |
 
 ---
 
-### Storage Modes
+### Configuration
 
-#### Local Mode (Development)
-```bash
---storage local
-```
-- Uses `data.json` file
-- Simple, fast, no setup required
-- Perfect for development and demos
+All settings live in `config.yaml` — nothing is hardcoded in the Python file:
 
-#### Snowflake Mode (Production)
-```bash
---storage snowflake
+```yaml
+home_team:
+  name: "Duke Blue Devils"    # Your home team
+
+auto_learn:
+  enabled: true
+  fetch_interval_hours: 6     # Check for new games every 6h
+  retrain_interval_hours: 24  # Force retrain every 24h
+  min_new_games_to_retrain: 15
+  promote_threshold: 0.002    # Only promote if AUC improves by this much
+
+models:
+  selection_metric: "roc_auc"
+  enabled:
+    - gradient_boosting
+    - random_forest
+    - extra_trees
+    - svm
+    - mlp
+    - xgboost
 ```
-- Uses cloud SQL database
-- Scalable to millions of records
-- Requires Snowflake credentials in `main.py`
-- Suitable for production deployment
+
+Snowflake credentials are read from environment variables (`SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`) — never hardcoded.
 
 ---
 
-## 🔄 Model Lifecycle Workflow
+## 🔄 Auto-Learning Pipeline
 
-### Phase 1: Initial Training
+When `--serve` is running, a background daemon thread manages continuous improvement:
 
-```bash
-# Generate data
-python main.py --generate --storage local
+```
+Every 6 hours:
+  → Fetch new games from ESPN
+  → Append unique games (deduplicated by game_id)
+  → If ≥ 15 new games added:
+      → Retrain all 6 models
+      → If new best AUC > current AUC + 0.002:
+          → Register new version, promote to active
+      → Else:
+          → Log "skipped" — model did not improve
 
-# Train models
-python main.py --train --storage local
-
-# Start serving predictions
-python main.py --serve --storage local
+Every 24 hours (regardless of new data):
+  → Force full retrain cycle
 ```
 
-### Phase 2: Seasonal Updates
-
-```bash
-# Fetch new season data
-python main.py --fetch-api --storage local
-
-# Retrain with updated dataset
-python main.py --train --storage local
-
-# Restart server with new model
-python main.py --serve --storage local
-```
-
-**Important:** Models are retrained **on-demand**, not on every prediction. This is realistic and maintainable for production systems.
+Every decision (promoted / skipped + reason) is written to `data/learning_log.json` and visible in the **Auto-Learn tab** of the dashboard.
 
 ---
 
@@ -272,221 +264,138 @@ python main.py --serve --storage local
 ```
 basketball-predictor/
 │
-├── main.py                      # Core application (all logic)
-│   ├── Data generation/ingestion
-│   ├── Storage handlers (JSON + Snowflake)
-│   ├── Model training & evaluation
-│   ├── Flask server & REST API
-│   └── Command-line interface
+├── main.py                  # Entire backend: data, models, API, scheduler
+├── dashboard.html           # Frontend: all tabs, charts, team picker
+├── config.yaml              # All configuration — no hardcoded values
+├── requirements.txt         # Pinned dependencies
+├── README.md
 │
-├── dashboard.html               # Interactive web dashboard
-│   ├── Prediction form
-│   ├── Analytics visualizations
-│   └── Model performance charts
+├── data/
+│   ├── games.json           # ESPN game records (gitignored)
+│   └── learning_log.json    # Auto-learn history
 │
-├── requirements.txt            # Python dependencies
-├── README.md                   # This file
-│
-├── Docs/                       # Detailed documentation
-│   ├── code_flow.md           # Architecture & data flow
-│   └── future_dev_map.md      # Planned enhancements
-│
-└── [Runtime Generated Files]
-    ├── data.json              # Dataset (local mode)
-    ├── best_model.pkl         # Trained model
-    ├── model_info.json        # Model metadata
-    └── model_comparison.json  # Performance metrics
+└── models/
+    ├── registry.json        # Version index + metrics
+    ├── latest_comparison.json
+    ├── comparison_v1.json
+    └── *.pkl                # Versioned model files (gitignored)
 ```
 
 ---
 
-## 🌐 Web Dashboard Features
+## 🌐 Dashboard Tabs
 
-### Prediction Tab
-- Enter 10 feature values for a matchup
-- Get instant prediction (Home Win / Away Win)
-- View model confidence score
-- See which model is making the prediction
+### 🔮 Predict
+- Home team (Duke) fixed from config
+- Pick any opponent from a dropdown — stats auto-fill from their season averages
+- Confidence % shown with result
 
-### Analytics Tab
-- **Dataset Overview:** Total games, home win rate, away win rate
-- **Model Comparison Chart:** Accuracy, precision, recall, F1-score for all models
-- **Outcome Distribution:** Home wins vs away wins visualization
-- **Feature Analysis:** Average statistics by outcome
+### 📊 Overview
+- Total games, home/away win rates
+- Outcome distribution donut chart
+- Active model radar chart
+- **Model AUC Over Time** — visual progression across all registered versions
+
+### ⚡ Model Comparison
+- All 6 models side-by-side metrics table with inline bar charts
+- Grouped bar chart (Accuracy / F1 / ROC-AUC)
+- Multi-model radar chart
+
+### 🔬 Feature Analysis
+- Average stats for home-win vs away-win games
+- Per-model feature importance horizontal bar chart (model selector dropdown)
+
+### 🗂 Registry
+- All registered versions with metrics
+- One-click **Activate** to promote any version
+- Training size and timestamp per version
+
+### 🤖 Auto-Learn
+- Scheduler status (idle / fetching / training) — live polled every 15s
+- Countdown to next fetch and retrain
+- Full learning log table (promoted / skipped per run)
+- Manual **Trigger Retrain** button
 
 ---
 
 ## 🔌 API Endpoints
 
-### GET `/`
-Serves the dashboard HTML
-
-### POST `/predict`
-Make a prediction for a single game
-
-**Request:**
-```json
-{
-  "home_ppg": 82.5,
-  "away_ppg": 76.3,
-  "home_fg_pct": 0.475,
-  "away_fg_pct": 0.442,
-  "home_rebounds": 39.8,
-  "away_rebounds": 35.2,
-  "home_assists": 17.5,
-  "away_assists": 14.8,
-  "home_turnovers": 11.2,
-  "away_turnovers": 13.7
-}
-```
-
-**Response:**
-```json
-{
-  "prediction": "Home Win",
-  "prediction_value": 1,
-  "confidence": 0.87,
-  "model_name": "Random Forest"
-}
-```
-
-### GET `/model_info`
-Returns current model metadata
-
-### GET `/analytics`
-Returns dataset statistics and model comparison data
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/` | Dashboard |
+| POST | `/predict` | Make a prediction |
+| GET | `/analytics` | Dataset stats + model comparison |
+| GET | `/model_info` | Active model metadata |
+| GET | `/registry` | All registered versions |
+| POST | `/registry/activate/<version>` | Promote a version |
+| GET | `/teams` | All teams + season averages |
+| GET | `/team_stats/<name>` | Stats for a specific team |
+| GET | `/home_team` | Configured home team + stats |
+| GET | `/autolearn/status` | Scheduler state |
+| POST | `/autolearn/trigger` | Manually trigger retrain |
+| GET | `/learning_log` | Training history |
+| GET | `/features` | Feature list from config |
+| GET | `/debug` | Health check for diagnosing issues |
 
 ---
 
 ## 📊 Model Evaluation Metrics
 
-All models are evaluated using:
-
-| Metric | Definition | Interpretation |
-|--------|------------|----------------|
-| **Accuracy** | (TP + TN) / Total | Overall correctness |
-| **Precision** | TP / (TP + FP) | How many predicted wins were actual wins? |
-| **Recall** | TP / (TP + FN) | How many actual wins did we catch? |
-| **F1-Score** | 2 × (P × R) / (P + R) | Balanced performance measure |
-
-**Model Selection:** Based on **F1-score** for balanced performance.
-
----
-
-## 🎓 Engineering Principles Demonstrated
-
-### 1. Separation of Concerns
-- Data layer separate from model layer
-- Training separate from serving
-- Storage abstraction allows backend swapping
-
-### 2. Reproducibility
-- Fixed random seeds (`random_state=42`)
-- Deterministic data generation
-- Version-controlled code
-
-### 3. Maintainability
-- Clear function responsibilities
-- Modular design
-- Comprehensive documentation
-
-### 4. Scalability
-- Flexible storage (local → Snowflake)
-- Model versioning capability
-- API-ready architecture
-
-### 5. Production Readiness
-- Error handling throughout
-- Logging and status messages
-- REST API for integration
-
----
-
-## 🔮 Future Enhancements
-
-This project is designed to evolve. Planned improvements include:
-
-### Short-Term
-- ✅ Cross-validation for robust model selection
-- ✅ Feature importance visualization
-- ✅ Hyperparameter tuning
-- ✅ Model versioning with timestamps
-
-### End goals
-- 📊 Integration with real NCAA data APIs
-- 🎯 Advanced features (player stats, momentum indicators)
-- 🔍 Model explainability (SHAP values)
-- 📈 Ensemble methods and stacking
-
-
-See `Docs/future_dev_map.md` for detailed roadmap.
-
----
-
-## 📚 Documentation
-
-Comprehensive documentation is available in the `Docs/` folder:
-
-| Document | Contents |
-|----------|----------|
-| **code_flow.md** | System architecture, component interactions, data flow diagrams |
-| **variable_list.md** | Feature descriptions, data types, valid ranges, metrics |
-| **future_dev_map.md** | Known limitations, enhancement roadmap, research opportunities |
-
----
-
-## 🛠️ Technical Stack
-
-**Core:**
-- Python 3.8+
-- scikit-learn 1.3.2 (ML models)
-- Flask 3.0.0 (web server)
-- NumPy 1.26.2 (numerical computing)
-
-**Storage:**
-- JSON (local development)
-- Snowflake (production SQL database)
-
-**Frontend:**
-- HTML5 + JavaScript
-- Chart.js (visualizations)
-- CSS3 (styling)
+| Metric | Definition |
+|--------|------------|
+| **Accuracy** | (TP + TN) / Total |
+| **Precision** | TP / (TP + FP) |
+| **Recall** | TP / (TP + FN) |
+| **F1-Score** | 2 × (P × R) / (P + R) |
+| **ROC-AUC** | Area under ROC curve — primary selection metric |
+| **CV ROC-AUC** | 5-fold cross-validated AUC ± std |
 
 ---
 
 ## ✅ Project Requirements Met
 
-This project satisfies the following engineering requirements:
+| Requirement | Status |
+|-------------|--------|
+| SQL database storage (Snowflake) | ✅ Provisioned, env-var credentials |
+| Local development option | ✅ JSON with full feature parity |
+| Real data ingestion | ✅ ESPN API, 500 games |
+| Multiple traditional ML models | ✅ 6 models (5 + optional XGBoost) |
+| Training and evaluation pipeline | ✅ With 5-fold CV |
+| Automated model selection | ✅ By ROC-AUC |
+| Python scripts, no notebooks | ✅ |
+| Command-line interface | ✅ |
+| Model serialization and persistence | ✅ Versioned registry |
+| Interactive web dashboard | ✅ 6 tabs |
+| Analytics visualizations | ✅ Charts, radar, importances |
+| Model retraining workflow | ✅ Automated + manual trigger |
+| No hardcoded secrets | ✅ Environment variables |
+| Data drift handling | ✅ Auto-learn with promote threshold |
 
-### Data Management
-- ✅ SQL database storage (Snowflake)
-- ✅ Local development option (JSON)
-- ✅ Synthetic data generation with documented process
+---
 
-### Machine Learning
-- ✅ Multiple traditional ML models
-- ✅ Training and evaluation pipeline
-- ✅ Model performance metrics
-- ✅ Automated model selection
+## 🚫 Known Limitations
 
-### Production Engineering
-- ✅ Python scripts (no notebooks)
-- ✅ Command-line interface
-- ✅ Model serialization and persistence
-- ✅ Prediction-ready system
+1. **ESPN unofficial API** — no SLA, could change or go down without notice
+2. **`home_ppg` = game score** — since ESPN gives us actual scores rather than season PPG averages, the PPG feature is technically the score from that specific game, not a rolling average
+3. **No SHAP values** — feature importances are raw model coefficients/impurities, not Shapley values
+4. **Single-instance Flask** — not production-hardened (no gunicorn, no auth)
 
-### User Interface
-- ✅ Interactive web dashboard
-- ✅ Prediction interface
-- ✅ Analytics visualizations
-- ✅ Model information display
+---
 
-### Lifecycle Management
-- ✅ Data update workflow
-- ✅ Model retraining capability
-- ✅ Version control ready
-- ✅ Clean folder structure
+## 🛠️ Technical Stack
 
+| Layer | Technology |
+|-------|-----------|
+| Language | Python 3.8+ |
+| ML | scikit-learn 1.8.0, XGBoost (optional) |
+| Web server | Flask 3.1.2 |
+| Numerical | NumPy 2.4.2 |
+| Config | PyYAML 6.0.3 |
+| Data fetch | requests 2.32.5 |
+| Storage | Local JSON / Snowflake |
+| Frontend | HTML5, Chart.js 4.4.2, vanilla JS |
+
+---
 ---
 
 ## 🎯 Design Philosophy
@@ -502,52 +411,6 @@ This project prioritizes **system engineering** over raw model performance. The 
 **Lesson:** Real-world ML is 70% engineering, 30% modeling.
 
 ---
-
-## 🚫 Known Limitations
-
-### Current System
-1. **Synthetic Data:** Uses generated data, not real game statistics
-2. **Limited Features:** Only 10 features (real systems use 30+)
-3. **Simple Models:** Traditional ML only (no deep learning)
-4. **Single Split:** No cross-validation in model selection
-5. **No Hyperparameter Tuning:** Uses default model parameters
-
-These limitations are **acknowledged and documented** - they represent opportunities for future enhancement, not flaws in the current system design.
-
----
-
-## 📝 Version Control
-
-This project is designed for **clear version control** using Git:
-
-### Commit Guidelines
-- Meaningful commit messages
-- Logical feature grouping
-- Regular commits (not one big dump)
-- Clean commit history
-
-### What to Commit
-- ✅ Source code (`main.py`, `dashboard.html`)
-- ✅ Dependencies (`requirements.txt`)
-- ✅ Documentation (`README.md`, `Docs/`)
-- ✅ Configuration templates
-- ❌ Generated files (`best_model.pkl`, `data.json`)
-- ❌ Credentials or API keys
-- ❌ Large datasets
-
----
-
-## 🤝 Contributing
-
-This is an academic project demonstrating ML engineering principles. The code is designed to be:
-
-- **Readable:** Clear variable names, logical structure
-- **Documented:** Comprehensive README and docstrings
-- **Extensible:** Easy to add new features or models
-- **Educational:** Serves as a learning reference
-
----
-
 ## 📄 License
 
 MIT License.
@@ -588,8 +451,9 @@ This project shows how to:
 
 *Built with 🏀 and ☕ by a student who cares about code quality, not just accuracy metrics.*
 
-**Last Updated:** February 2024  
+**Last Updated:** March 2026  
 **Python Version:** 3.8+  
 
 **Status:** Production-ready for academic demonstration
+
 
