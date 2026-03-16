@@ -1,672 +1,1064 @@
 # Import Dumpyard
-import json
-import os
-import argparse
-import pickle
+import json, os, time, pickle, hashlib, argparse, traceback, warnings
+import threading
 import numpy as np
-from datetime import datetime
+import requests
+
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import yaml
 from flask import Flask, request, jsonify, send_file
-from sklearn.linear_model import LogisticRegression, LinearRegression
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+from sklearn.ensemble import (
+    GradientBoostingClassifier, RandomForestClassifier, ExtraTreesClassifier
+)
+from sklearn.svm import SVC
+from sklearn.neural_network import MLPClassifier
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score,
+    f1_score, roc_auc_score, confusion_matrix,
+)
+
+warnings.filterwarnings("ignore")
 
 
-# CONFIGURATION
+# CONFIG
 
-LOCAL_DATA_FILE = "data.json"
-MODEL_FILE = "best_model.pkl"
-MODEL_INFO_FILE = "model_info.json"
-MODEL_COMPARISON_FILE = "model_comparison.json"
+def load_config(path: str = "config.yaml") -> dict:
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
 
-# Snowflake configuration (update with your credentials)
-# Will be transferred to Json file in future versions
-SNOWFLAKE_CONFIG = {
-    "user": "YOUR_USERNAME",
-    "password": "YOUR_PASSWORD",
-    "account": "YOUR_ACCOUNT",
-    "warehouse": "YOUR_WAREHOUSE",
-    "database": "YOUR_DATABASE",
-    "schema": "YOUR_SCHEMA",
-    "table": "BASKETBALL_GAMES"
-} # don't want to give my credentials to hackers so easily... at least they should take me to dinner first.
+CFG        = load_config()
+APP_CFG    = CFG["app"]
+HT_CFG     = CFG["home_team"]
+DATA_CFG   = CFG["data"]
+API_CFG    = CFG["ncaa_api"]
+SF_CFG     = CFG["snowflake"]
+MODEL_CFG  = CFG["models"]
+AL_CFG     = CFG["auto_learn"]
 
+DATA_DIR      = Path(DATA_CFG["dir"])
+LOCAL_FILE    = Path(DATA_CFG["local_file"])
+MODELS_DIR    = Path(MODEL_CFG["dir"])
+REGISTRY_FILE = Path(MODEL_CFG["registry_file"])
+LEARN_LOG     = Path(AL_CFG["learning_log_file"])
 
-
-# DATA GENERATION
-
-def generate_synthetic_data(num_games=500):
-    """Generate synthetic basketball game data."""
-    print(f"Generating {num_games} synthetic basketball games...")
-
-    data = []
-    for i in range(num_games):
-        # Generate features with some correlation to outcome
-        home_ppg = np.random.uniform(65, 95)
-        away_ppg = np.random.uniform(65, 95)
-        home_fg_pct = np.random.uniform(0.40, 0.55)
-        away_fg_pct = np.random.uniform(0.40, 0.55)
-        home_rebounds = np.random.uniform(30, 50)
-        away_rebounds = np.random.uniform(30, 50)
-        home_assists = np.random.uniform(12, 25)
-        away_assists = np.random.uniform(12, 25)
-        home_turnovers = np.random.uniform(8, 18)
-        away_turnovers = np.random.uniform(8, 18)
-        # FBI type of calculation
-
-        # Calculate a "strength" score to determine winner
-        home_strength = (home_ppg * 0.3 + home_fg_pct * 100 +
-                         home_rebounds * 0.5 + home_assists * 0.8 -
-                         home_turnovers * 0.5)
-        away_strength = (away_ppg * 0.3 + away_fg_pct * 100 +
-                         away_rebounds * 0.5 + away_assists * 0.8 -
-                         away_turnovers * 0.5)
-
-        # Add home court advantage
-        home_strength += 3
-
-        # Determine winner (1 = Home Win, 0 = Away Win) with some level of randomness
-        if home_strength > away_strength:
-            outcome = 1 if np.random.random() > 0.15 else 0 # 85% chance home wins if stronger
-        else:
-            outcome = 0 if np.random.random() > 0.15 else 1
-
-        game = {
-            "game_id": f"GAME_{i + 1:04d}",
-            "home_ppg": round(home_ppg, 2),
-            "away_ppg": round(away_ppg, 2),
-            "home_fg_pct": round(home_fg_pct, 3),
-            "away_fg_pct": round(away_fg_pct, 3),
-            "home_rebounds": round(home_rebounds, 2),
-            "away_rebounds": round(away_rebounds, 2),
-            "home_assists": round(home_assists, 2),
-            "away_assists": round(away_assists, 2),
-            "home_turnovers": round(home_turnovers, 2),
-            "away_turnovers": round(away_turnovers, 2),
-            # future metrics can be added here
-            # remember to update model training accordingly
-            "outcome": outcome
-        }
-        data.append(game)
-
-    print(f"Generated {len(data)} games.")
-    return data
+DATA_DIR.mkdir(exist_ok=True)
+MODELS_DIR.mkdir(exist_ok=True)
 
 
-# API SIMULATION
+# SNOWFLAKE  (provision kept, disabled for now, ran out of accounts)
 
-def simulate_api_fetch(num_new_games=100):
-    """Simulate fetching new season data from an API."""
-    print(f"Simulating API fetch of {num_new_games} new games...")
-
-    # In a real system, this would call an external API
-    # For this project, we generate new synthetic data
-    # Will add future API integration here
-    new_data = generate_synthetic_data(num_new_games)
-
-    print(f"Fetched {len(new_data)} new games from API (simulated).")
-    return new_data
-
-
-
-# STORAGE: LOCAL JSON
-
-# Are ya winning JSON?
-def save_to_json(data, filename=LOCAL_DATA_FILE):
-    """Save data to a local JSON file."""
-    print(f"Saving data to {filename}...")
-    with open(filename, 'w') as f:
-        json.dump(data, f, indent=2)
-    print(f"Saved {len(data)} records to {filename}.")
-
-
-def load_from_json(filename=LOCAL_DATA_FILE):
-    """Load data from a local JSON file."""
-    if not os.path.exists(filename):
-        print(f"File {filename} not found.")
-        return []
-
-    print(f"Loading data from {filename}...")
-    with open(filename, 'r') as f:
-        data = json.load(f)
-    print(f"Loaded {len(data)} records from {filename}.")
-    return data
-
-
-def append_to_json(new_data, filename=LOCAL_DATA_FILE):
-    """Append new data to existing JSON file."""
-    existing_data = load_from_json(filename)
-    combined_data = existing_data + new_data
-    save_to_json(combined_data, filename)
-    print(f"Appended {len(new_data)} new records. Total: {len(combined_data)}")
-
-
-
-# STORAGE: SNOWFLAKE
-
-# For now it is this way, data storage via API to snowflake will be added in future versions
-# still working on it. should API go local or snowflake first? hmmm
-# maybe snowflake first, then local backup? for security reasons
-# But keeping both options for now
-def get_snowflake_connection():
-    """Create a Snowflake connection."""
+def _sf_conn():
+    if not SF_CFG.get("enabled"):
+        print("[Snowflake] Disabled in config.")
+        return None
     try:
-        import snowflake.connector
-        conn = snowflake.connector.connect(**SNOWFLAKE_CONFIG)
-        print("Connected to Snowflake.")
+        import snowflake.connector # lazy import to avoid dependency if not used
+        conn = snowflake.connector.connect(
+            user     = SF_CFG.get("user")     or os.environ.get("SNOWFLAKE_USER", ""),
+            password = SF_CFG.get("password") or os.environ.get("SNOWFLAKE_PASSWORD", ""),
+            account  = SF_CFG["account"],
+            warehouse= SF_CFG["warehouse"],
+            database = SF_CFG["database"],
+            schema   = SF_CFG["schema"],
+        )
+        print("[Snowflake] Connected.")
         return conn
-    except ImportError:
-        print("ERROR: snowflake-connector-python not installed.")
-        print("Install with: pip install snowflake-connector-python")
+    except ImportError: # so much safety, am I not fabulous enough for you, Snowflake?
+        print("[Snowflake] snowflake-connector-python not installed.")
         return None
     except Exception as e:
-        print(f"ERROR connecting to Snowflake: {e}")
+        print(f"[Snowflake] Connection error: {e}")
         return None
 
-
-def create_snowflake_table(conn):
-    """Create the basketball games table in Snowflake if it doesn't exist."""
-    cursor = conn.cursor()
-    create_table_sql = f"""
-    CREATE TABLE IF NOT EXISTS {SNOWFLAKE_CONFIG['table']} (
-        game_id VARCHAR(50),
-        home_ppg FLOAT,
-        away_ppg FLOAT,
-        home_fg_pct FLOAT,
-        away_fg_pct FLOAT,
-        home_rebounds FLOAT,
-        away_rebounds FLOAT,
-        home_assists FLOAT,
-        away_assists FLOAT,
-        home_turnovers FLOAT,
-        away_turnovers FLOAT,
-        outcome INT
-    )
-    """
-    cursor.execute(create_table_sql)
-    print(f"Table {SNOWFLAKE_CONFIG['table']} is ready.")
-    cursor.close()
-
+def _sf_create_table(conn):
+    cur = conn.cursor()
+    cols = ", ".join([f"{f} FLOAT" for f in DATA_CFG["features"]])
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS {SF_CFG['table']} (
+            game_id VARCHAR(80), home_team VARCHAR(100), away_team VARCHAR(100),
+            {cols}, outcome INT
+        )
+    """)
+    cur.close()
 
 def save_to_snowflake(data):
-    """Save data to Snowflake."""
-    conn = get_snowflake_connection()
-    if not conn:
-        return
-
-    create_snowflake_table(conn)
-    cursor = conn.cursor()
-
-    # Clear existing data
-    cursor.execute(f"DELETE FROM {SNOWFLAKE_CONFIG['table']}")
-
-    # Insert new data
-    insert_sql = f"""
-    INSERT INTO {SNOWFLAKE_CONFIG['table']} 
-    (game_id, home_ppg, away_ppg, home_fg_pct, away_fg_pct, 
-     home_rebounds, away_rebounds, home_assists, away_assists, 
-     home_turnovers, away_turnovers, outcome)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """
-
-    for game in data:
-        cursor.execute(insert_sql, (
-            game['game_id'], game['home_ppg'], game['away_ppg'],
-            game['home_fg_pct'], game['away_fg_pct'],
-            game['home_rebounds'], game['away_rebounds'],
-            game['home_assists'], game['away_assists'],
-            game['home_turnovers'], game['away_turnovers'],
-            game['outcome']
-        ))
-
-    conn.commit()
-    print(f"Saved {len(data)} records to Snowflake.")
-    cursor.close()
-    conn.close()
-
+    conn = _sf_conn()
+    if not conn: return
+    _sf_create_table(conn)
+    cur = conn.cursor()
+    cur.execute(f"DELETE FROM {SF_CFG['table']}")
+    _sf_insert_batch(cur, data)
+    conn.commit(); cur.close(); conn.close()
+    print(f"[Snowflake] Saved {len(data)} records.")
 
 def load_from_snowflake():
-    """Load data from Snowflake."""
-    conn = get_snowflake_connection()
-    if not conn:
-        return []
-
-    cursor = conn.cursor()
-    cursor.execute(f"SELECT * FROM {SNOWFLAKE_CONFIG['table']}")
-
-    columns = [col[0].lower() for col in cursor.description]
-    data = []
-
-    for row in cursor:
-        game = dict(zip(columns, row))
-        data.append(game)
-
-    print(f"Loaded {len(data)} records from Snowflake.")
-    cursor.close()
-    conn.close()
+    conn = _sf_conn()
+    if not conn: return []
+    cur = conn.cursor()
+    cur.execute(f"SELECT * FROM {SF_CFG['table']}")
+    cols = [c[0].lower() for c in cur.description]
+    data = [dict(zip(cols, row)) for row in cur]
+    cur.close(); conn.close()
+    print(f"[Snowflake] Loaded {len(data)} records.")
     return data
 
-
 def append_to_snowflake(new_data):
-    """Append new data to Snowflake."""
-    conn = get_snowflake_connection()
-    if not conn:
-        return
+    conn = _sf_conn()
+    if not conn: return
+    _sf_create_table(conn)
+    cur = conn.cursor()
+    _sf_insert_batch(cur, new_data)
+    conn.commit(); cur.close(); conn.close()
+    print(f"[Snowflake] Appended {len(new_data)} records.")
 
-    create_snowflake_table(conn)
-    cursor = conn.cursor()
+def _sf_insert_batch(cur, data):
+    col_features = DATA_CFG["features"]
+    ph   = ", ".join(["%s"] * (3 + len(col_features) + 1))
+    cols = "game_id, home_team, away_team, " + ", ".join(col_features) + ", outcome"
+    sql  = f"INSERT INTO {SF_CFG['table']} ({cols}) VALUES ({ph})"
+    for g in data:
+        vals = [g.get("game_id"), g.get("home_team",""), g.get("away_team","")]
+        vals += [g.get(feat, 0) for feat in col_features]
+        vals.append(g["outcome"])
+        cur.execute(sql, vals)
+# I know I could do this with a single bulk insert and avoid the loop,
+# but I'm trying to keep it simple and compatible with the free Snowflake tier.
+# And I am avoiding SQLAlchemy or Pandas to keep dependencies minimal. Sue me, Snowflake.
 
-    insert_sql = f"""
-    INSERT INTO {SNOWFLAKE_CONFIG['table']} 
-    (game_id, home_ppg, away_ppg, home_fg_pct, away_fg_pct, 
-     home_rebounds, away_rebounds, home_assists, away_assists, 
-     home_turnovers, away_turnovers, outcome)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+
+# ESPN DATA FETCHER
+
+# All hail, Free ESPN API, the gift that keeps on giving (and giving, and giving)
+# no auth, no keys, no limits (well, some limits), just pure unadulterated data access.
+# I will offer incense prayers to the ESPN gods
+class ESPNFetcher:
+    BASE = API_CFG["espn"]["base_url"]
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": "Mozilla/5.0 (research)"})
+        self.delay = API_CFG.get("rate_limit_delay", 0.4)
+
+    def _get(self, url, params=None):
+        try:
+            r = self.session.get(url, params=params, timeout=10)
+            r.raise_for_status()
+            time.sleep(self.delay)
+            return r.json()
+        except Exception as e:
+            print(f"  [ESPN] {url}: {e}")
+            return None
+
+    def get_game_ids(self, start_date: str, end_date: str) -> list:
+        ids = []
+        current = datetime.strptime(start_date, "%Y%m%d")
+        end     = datetime.strptime(end_date,   "%Y%m%d")
+        page_size = API_CFG["espn"].get("page_size", 25)
+        while current <= end:
+            data = self._get(
+                f"{self.BASE}{API_CFG['espn']['scoreboard_path']}",
+                params={"dates": current.strftime("%Y%m%d"), "limit": page_size}
+            )
+            if data:
+                for event in data.get("events", []):
+                    ids.append(event["id"])
+            current += timedelta(days=1)
+        return ids
+
+    def get_box_score(self, event_id: str):
+        data = self._get(
+            f"{self.BASE}{API_CFG['espn']['summary_path']}",
+            params={"event": event_id}
+        )
+        if not data:
+            return None
+        try:
+            box       = data.get("boxscore", {})
+            box_teams = box.get("teams", [])
+            if len(box_teams) < 2:
+                return None
+
+            home_d = away_d = None
+            for t in box_teams:
+                if   t.get("homeAway") == "home": home_d = t
+                elif t.get("homeAway") == "away": away_d = t
+            if not home_d or not away_d:
+                return None
+
+            def stats(td):
+                return {s["name"]: s.get("displayValue","0") for s in td.get("statistics",[])}
+
+            hs, as_ = stats(home_d), stats(away_d)
+
+            def flt(d, k, fb=0.0):
+                try: return float(str(d.get(k, fb)).replace("%",""))
+                except (ValueError, TypeError, AttributeError): return float(fb)
+
+            comps = data.get("header",{}).get("competitions",[{}])
+            if not comps: return None
+            home_score = away_score = 0
+            for ct in comps[0].get("competitors",[]):
+                score = int(ct.get("score", 0))
+                if ct.get("homeAway") == "home": home_score = score
+                elif ct.get("homeAway") == "away": away_score = score
+            if home_score == 0 and away_score == 0:
+                return None
+
+            def norm_pct(v):
+                return v / 100 if v > 1 else v
+
+            return {
+                "game_id":        f"ESPN_{event_id}",
+                "home_team":      home_d.get("team",{}).get("displayName","Home"),
+                "away_team":      away_d.get("team",{}).get("displayName","Away"),
+                "home_score":     home_score,
+                "away_score":     away_score,
+                "home_ppg":       float(home_score),
+                "away_ppg":       float(away_score),
+                "home_fg_pct":    round(norm_pct(flt(hs, "fieldGoalPct")), 4),
+                "away_fg_pct":    round(norm_pct(flt(as_, "fieldGoalPct")), 4),
+                "home_3p_pct":    round(norm_pct(flt(hs, "threePointPct")), 4),
+                "away_3p_pct":    round(norm_pct(flt(as_, "threePointPct")), 4),
+                "home_rebounds":  flt(hs, "totalRebounds"),
+                "away_rebounds":  flt(as_, "totalRebounds"),
+                "home_assists":   flt(hs, "assists"),
+                "away_assists":   flt(as_, "assists"),
+                "home_turnovers": flt(hs, "turnovers"),
+                "away_turnovers": flt(as_, "turnovers"),
+                "home_steals":    flt(hs, "steals"),
+                "away_steals":    flt(as_, "steals"),
+                "home_blocks":    flt(hs, "blocks"),
+                "away_blocks":    flt(as_, "blocks"),
+                "outcome":        1 if home_score > away_score else 0,
+                "source":         "espn",
+                "fetched_at":     datetime.now().isoformat(),
+            } # holy cow, ESPN, I love you but this is a nightmare to parse. it is free so no complaints
+        except Exception as e:
+            print(f"  [ESPN] Parse error {event_id}: {e}")
+            return None
+
+
+class CustomAPIFetcher: # Let's play fetch
+    def __init__(self):
+        custom = API_CFG.get("custom", {})
+        self.base_url  = custom.get("base_url", "")
+        self.api_key   = custom.get("api_key", "") or os.environ.get("NCAA_API_KEY", "")
+        self.endpoint  = custom.get("games_endpoint", "/games")
+        self.field_map = custom.get("field_map", {})
+
+    def fetch(self, season, max_games):
+        if not self.base_url:
+            print("[CustomAPI] base_url not set."); return []
+        try:
+            r = requests.get(
+                self.base_url + self.endpoint,
+                params={API_CFG["custom"].get("season_param","season"): season,
+                        "limit": max_games, "api_key": self.api_key},
+                timeout=15
+            )
+            r.raise_for_status()
+            return [self._map(g) for g in r.json() if self._map(g)]
+        except Exception as e:
+            print(f"[CustomAPI] {e}"); return []
+
+    def _map(self, raw):
+        fm = self.field_map
+        try:
+            return {
+                "game_id":    raw.get(fm.get("game_id","id"),""),
+                "home_team":  raw.get(fm.get("home_team","home_team"),""),
+                "away_team":  raw.get(fm.get("away_team","away_team"),""),
+                "outcome":    1 if raw.get(fm.get("home_score","home_score"),0) >
+                                   raw.get(fm.get("away_score","away_score"),0) else 0,
+                "source":     "custom",
+                "fetched_at": datetime.now().isoformat(),
+            }
+        except (KeyError, TypeError, AttributeError):
+            return None
+
+
+def fetch_ncaa_data(max_games=None):
+    max_games = max_games or API_CFG.get("max_games", 500)
+    provider  = API_CFG.get("provider", "espn")
+    if provider == "custom":
+        return CustomAPIFetcher().fetch(API_CFG.get("season", 2024), max_games)
+    fetcher  = ESPNFetcher()
+    season   = API_CFG.get("season", 2024)
+    start, end = f"{season}1101", f"{season+1}0430"
+    print(f"[ESPN] Fetching IDs {start}→{end}...")
+    game_ids = fetcher.get_game_ids(start, end)
+    print(f"[ESPN] {len(game_ids)} events. Fetching box scores...")
+    games, errors = [], 0
+    for i, gid in enumerate(game_ids[:max_games]):
+        g = fetcher.get_box_score(gid)
+        if g: games.append(g)
+        else: errors += 1
+        if (i+1) % 50 == 0:
+            print(f"  {i+1}/{min(len(game_ids),max_games)} valid={len(games)} skipped={errors}")
+    print(f"[ESPN] Done. Valid={len(games)}, Skipped={errors}")
+    return games # writing graceful code is a nightmare these days, this is MY SLOP!
+
+
+# LOCAL STORAGE
+
+def save_to_json(data): # simple local storage as JSON backup and for easy debugging/inspection
+    LOCAL_FILE.parent.mkdir(exist_ok=True)
+    with open(LOCAL_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"[Storage] Saved {len(data)} records → {LOCAL_FILE}")
+
+def load_from_json():
+    if not LOCAL_FILE.exists():
+        return []
+    with open(LOCAL_FILE) as f:
+        data = json.load(f)
+    return data
+
+def append_to_json(new_data):
+    existing    = load_from_json()
+    existing_ids = {g.get("game_id") for g in existing}
+    new_unique  = [g for g in new_data if g.get("game_id") not in existing_ids]
+    combined    = existing + new_unique
+    save_to_json(combined)
+    print(f"[Storage] +{len(new_unique)} new games (total: {len(combined)})")
+    return len(new_unique)
+
+def load_data(storage="local"):
+    return load_from_snowflake() if storage == "snowflake" else load_from_json()
+
+
+# TEAM STATS, season averages from game records
+
+def build_team_stats(data: list) -> dict:
     """
+    Compute each team's average stats across all their games.
+    When a team played at home, their "home_*" columns are their stats.
+    When away, their "away_*" columns. We normalize everything to a
+    neutral per-team-per-feature average so the predict form can pre-fill.
+    """
+    cfg_features = DATA_CFG["features"]
+    accum = {}  # team_name -> { feature -> [values] }
 
-    for game in new_data:
-        cursor.execute(insert_sql, (
-            game['game_id'], game['home_ppg'], game['away_ppg'],
-            game['home_fg_pct'], game['away_fg_pct'],
-            game['home_rebounds'], game['away_rebounds'],
-            game['home_assists'], game['away_assists'],
-            game['home_turnovers'], game['away_turnovers'],
-            game['outcome']
-        ))
+    for g in data:
+        ht = g.get("home_team","").strip()
+        at = g.get("away_team","").strip()
+        if not ht or not at:
+            continue
 
-    conn.commit()
-    print(f"Appended {len(new_data)} new records to Snowflake.")
-    cursor.close()
-    conn.close()
+        if ht not in accum:
+            accum[ht] = {feat: [] for feat in cfg_features}
+        if at not in accum:
+            accum[at] = {feat: [] for feat in cfg_features}
+
+        for feat in cfg_features:
+            if feat.startswith("home_"):
+                accum[ht][feat].append(float(g.get(feat, 0)))
+                mirror = "away_" + feat[5:]
+                accum[at][feat].append(float(g.get(mirror, 0)))
+            elif feat.startswith("away_"):
+                accum[at][feat].append(float(g.get(feat, 0)))
+                mirror = "home_" + feat[5:]
+                accum[ht][feat].append(float(g.get(mirror, 0)))
+                # This logic assumes that for every "home_X"
+                # there is a corresponding "away_X" that represents the same stat for the other team
+                # This way, we can aggregate stats for each team regardless of whether they were home or away
+                # I hate myself
+
+    result = {}
+    for team, stats in accum.items():
+        if not team:
+            continue
+        games_played = len(next(iter(stats.values()), []))
+        if games_played == 0:
+            continue
+        result[team] = {feat: round(sum(v)/len(v), 4) if v else 0.0 for feat, v in stats.items()}
+        result[team]["games_played"] = games_played
+        result[team]["wins"] = sum(
+            1 for g in data
+            if (g.get("home_team","").strip() == team and g.get("outcome") == 1) or
+               (g.get("away_team","").strip() == team and g.get("outcome") == 0)
+        )
+
+    return result # As graceful as dynamite
 
 
+def get_home_team_stats(data: list):
+    ts   = build_team_stats(data)
+    name = HT_CFG["name"]
+    if name in ts:
+        return {"name": name, "stats": ts[name]}
+    for k in ts:
+        if name.lower() in k.lower() or k.lower() in name.lower():
+            return {"name": k, "stats": ts[k]}
+    return None
 
-# MODEL TRAINING
 
-# 3 models: Logistic Regression, Random Forest, Linear Regression (thresholded)
-# problem is binary classification, so linear regression will be thresholded at 0.5
-# another problem: 3 models to compare but one being pkl-ed, simultaneous calc required. or 9-10 times linear is chosen?
+# MODEL REGISTRY
+
+# Model versions, first time doing this.... lesgooo!
+def _load_registry() -> dict:
+    if REGISTRY_FILE.exists():
+        with open(REGISTRY_FILE) as f:
+            return json.load(f)
+    return {"versions": [], "active_version": None}
+
+def _save_registry(reg):
+    REGISTRY_FILE.parent.mkdir(exist_ok=True)
+    with open(REGISTRY_FILE, "w") as f:
+        json.dump(reg, f, indent=2)
+
+def register_model(model_name, model_obj, metrics, feature_names, training_size) -> str:
+    reg      = _load_registry()
+    existing = [int(v["version"].lstrip("v")) for v in reg["versions"]]
+    ver_num  = (max(existing) + 1) if existing else 1
+    version  = f"v{ver_num}"
+    model_hash = hashlib.md5(pickle.dumps(model_obj)).hexdigest()[:8]
+    filename   = f"{model_name.lower().replace(' ','_')}_{version}_{model_hash}.pkl"
+
+    model_path = MODELS_DIR / filename
+    model_path.write_bytes(pickle.dumps({"model": model_obj, "feature_names": feature_names}))
+
+    entry = {
+        "version": version, "model_name": model_name, "filename": filename,
+        "metrics": metrics, "feature_names": feature_names,
+        "training_size": training_size, "trained_at": datetime.now().isoformat(),
+        "hash": model_hash,
+    }
+    reg["versions"].append(entry)
+    reg["active_version"] = version
+
+    keep = MODEL_CFG.get("keep_top_n", 10)
+    if len(reg["versions"]) > keep:
+        for old in reg["versions"][:-keep]:
+            p = MODELS_DIR / old["filename"]
+            if p.exists(): p.unlink()
+        reg["versions"] = reg["versions"][-keep:]
+
+    _save_registry(reg)
+    print(f"[Registry] {model_name} → {version}")
+    return version # I give up
+
+def load_active_model():
+    reg = _load_registry()
+    if not reg["active_version"] or not reg["versions"]:
+        return None, None
+    entry = next((v for v in reg["versions"] if v["version"] == reg["active_version"]), None)
+    if not entry:
+        return None, None
+    path = MODELS_DIR / entry["filename"]
+    if not path.exists():
+        return None, None
+    with open(path, "rb") as f:
+        payload = pickle.load(f)
+    return payload["model"], entry
+
+def set_active_version(version) -> bool:
+    reg = _load_registry()
+    if any(v["version"] == version for v in reg["versions"]):
+        reg["active_version"] = version
+        _save_registry(reg)
+        return True
+    return False
+
+
+# LEARNING LOG
+
+# got to log it somewhere.
+def _load_log() -> list:
+    if LEARN_LOG.exists():
+        with open(LEARN_LOG) as f:
+            return json.load(f)
+    return []
+
+def _append_log(entry: dict):
+    log = _load_log()
+    log.append(entry)
+    LEARN_LOG.parent.mkdir(exist_ok=True)
+    with open(LEARN_LOG, "w") as f:
+        json.dump(log, f, indent=2)
+
+
+# FEATURE PREP + MODEL DEFINITIONS
+
 def prepare_data(data):
-    """Convert data to numpy arrays for training."""
-    features = []
-    labels = []
+    cfg_features = DATA_CFG["features"]
+    label        = DATA_CFG["label"]
+    valid        = [g for g in data if all(feat in g for feat in cfg_features) and label in g]
+    if not valid:
+        raise ValueError("No valid records with required features.")
+    X = np.array([[g[feat] for feat in cfg_features] for g in valid], dtype=float)
+    y = np.array([int(g[label]) for g in valid])
+    return X, y, cfg_features # for backwards compatibility with old models that expect a feature_names list
 
-    feature_names = [
-        'home_ppg', 'away_ppg', 'home_fg_pct', 'away_fg_pct',
-        'home_rebounds', 'away_rebounds', 'home_assists', 'away_assists',
-        'home_turnovers', 'away_turnovers'
-    ]
+def build_models() -> dict: # do not touch this. I do not know why I made this
+    enabled = MODEL_CFG.get("enabled", [])
+    mc      = MODEL_CFG
+    pipe    = {}
 
-    for game in data:
-        feature_vector = [game[fname] for fname in feature_names]
-        features.append(feature_vector)
-        labels.append(game['outcome'])
+    if "gradient_boosting" in enabled:
+        c = mc.get("gradient_boosting", {})
+        pipe["Gradient Boosting"] = Pipeline([("s", StandardScaler()),
+            ("clf", GradientBoostingClassifier(
+                n_estimators=c.get("n_estimators",200), learning_rate=c.get("learning_rate",0.05),
+                max_depth=c.get("max_depth",4), subsample=c.get("subsample",0.8),
+                min_samples_split=c.get("min_samples_split",5), random_state=c.get("random_state",42)))])
+    if "random_forest" in enabled:
+        c = mc.get("random_forest", {})
+        pipe["Random Forest"] = Pipeline([("s", StandardScaler()),
+            ("clf", RandomForestClassifier(
+                n_estimators=c.get("n_estimators",200), max_depth=c.get("max_depth",12),
+                min_samples_split=c.get("min_samples_split",5), min_samples_leaf=c.get("min_samples_leaf",2),
+                random_state=c.get("random_state",42)))])
+    if "extra_trees" in enabled:
+        c = mc.get("extra_trees", {})
+        pipe["Extra Trees"] = Pipeline([("s", StandardScaler()),
+            ("clf", ExtraTreesClassifier(
+                n_estimators=c.get("n_estimators",200), max_depth=c.get("max_depth",12),
+                min_samples_split=c.get("min_samples_split",5), random_state=c.get("random_state",42)))])
+    if "svm" in enabled:
+        c = mc.get("svm", {})
+        pipe["SVM (RBF)"] = Pipeline([("s", StandardScaler()),
+            ("clf", SVC(kernel=c.get("kernel","rbf"), C=c.get("C",1.0), gamma=c.get("gamma","scale"),
+                        probability=True, random_state=c.get("random_state",42)))])
+    if "mlp" in enabled:
+        c = mc.get("mlp", {})
+        pipe["Neural Network (MLP)"] = Pipeline([("s", StandardScaler()),
+            ("clf", MLPClassifier(hidden_layer_sizes=tuple(c.get("hidden_layer_sizes",[128,64,32])),
+                                  activation=c.get("activation","relu"), max_iter=c.get("max_iter",500),
+                                  early_stopping=True, validation_fraction=0.1,
+                                  random_state=c.get("random_state",42)))])
+    if "xgboost" in enabled:
+        try:
+            from xgboost import XGBClassifier  # noqa: PLC0415
+            c = mc.get("xgboost", {})
+            pipe["XGBoost"] = Pipeline([("s", StandardScaler()),
+                ("clf", XGBClassifier(
+                    n_estimators=c.get("n_estimators",200), learning_rate=c.get("learning_rate",0.05),
+                    max_depth=c.get("max_depth",4), subsample=c.get("subsample",0.8),
+                    colsample_bytree=c.get("colsample_bytree",0.8),
+                    eval_metric="logloss", random_state=c.get("random_state",42), verbosity=0))])
+        except ImportError:
+            XGBClassifier = None  # not installed — skipped gracefully
+            print("[Models] XGBoost not installed — skipping.")
+    return pipe # AAAAAAAAAAAAAAAAH
 
-    return np.array(features), np.array(labels)
-
-
-def train_and_evaluate_models(storage_mode):
-    """Train all three models and select the best one."""
-    print("\n" + "=" * 70)
-    print("TRAINING AND EVALUATION")
-    print("=" * 70)
-
-    # Load data
-    if storage_mode == 'local':
-        data = load_from_json()
+def compute_metrics(model, X_test, y_test) -> dict:
+    y_pred = model.predict(X_test)
+    m = {
+        "accuracy":  round(accuracy_score(y_test, y_pred), 4),
+        "precision": round(precision_score(y_test, y_pred, zero_division=0), 4),
+        "recall":    round(recall_score(y_test, y_pred, zero_division=0), 4),
+        "f1":        round(f1_score(y_test, y_pred, zero_division=0), 4),
+        "confusion_matrix": confusion_matrix(y_test, y_pred).tolist(),
+    }
+    if hasattr(model, "predict_proba"):
+        m["roc_auc"] = round(roc_auc_score(y_test, model.predict_proba(X_test)[:,1]), 4)
     else:
-        data = load_from_snowflake()
+        m["roc_auc"] = m["accuracy"]
+    return m
 
-    if len(data) == 0:
-        print("ERROR: No data available. Run --generate first.")
-        return
+def get_feature_importances(model, feature_names):
+    clf = model.named_steps.get("clf")
+    if clf is None: return None
+    if hasattr(clf, "feature_importances_"):
+        imps = clf.feature_importances_
+    elif hasattr(clf, "coef_"):
+        imps = np.abs(clf.coef_[0]) if clf.coef_.ndim > 1 else np.abs(clf.coef_)
+    else:
+        return None
+    return dict(zip(feature_names, [round(float(v), 6) for v in imps]))
 
-    # Prepare data
-    ex, y = prepare_data(data)
-    ex_train, ex_test, y_train, y_test = train_test_split(
-        ex, y, test_size=0.2, random_state=42
+
+# TRAINING  (shared by CLI and auto-learn)
+
+# got to allow this dude to learn from it's mistakes....
+# no clanker of mine is going into this world being able to improve itself.
+def train_and_evaluate(storage="local", triggered_by="manual"):
+    print(f"\n{'='*70}\nTRAINING ({triggered_by})\n{'='*70}")
+    data = load_data(storage)
+    if len(data) < DATA_CFG.get("min_games_required", 50):
+        print(f"[Train] Not enough data ({len(data)}). Skipping.")
+        return None
+
+    X, y, feature_names = prepare_data(data)
+    X_tr, X_te, y_tr, y_te = train_test_split(
+        X, y, test_size=DATA_CFG["test_size"],
+        random_state=DATA_CFG["random_state"], stratify=y
+    )
+    print(f"Dataset: {len(data)} games  Train:{len(X_tr)}  Test:{len(X_te)}")
+    print(f"Home win rate: {y.mean():.2%}\n")
+
+    models    = build_models()
+    results   = {}
+    sel_metric = MODEL_CFG.get("selection_metric", "roc_auc")
+
+    for name, model in models.items():
+        print(f"▶ {name}...") # yes i know i found ▶ in the unicode table and I am very proud of myself
+        model.fit(X_tr, y_tr)
+        m  = compute_metrics(model, X_te, y_te)
+        fi = get_feature_importances(model, feature_names)
+        if fi: m["feature_importances"] = fi
+        cv = cross_val_score(model, X, y, cv=5, scoring="roc_auc")
+        m["cv_roc_auc_mean"] = round(float(cv.mean()), 4)
+        m["cv_roc_auc_std"]  = round(float(cv.std()), 4)
+        results[name] = {"model": model, "metrics": m}
+        print(f"  Acc:{m['accuracy']:.4f} F1:{m['f1']:.4f} "
+              f"AUC:{m['roc_auc']:.4f} CV-AUC:{m['cv_roc_auc_mean']:.4f}±{m['cv_roc_auc_std']:.4f}")
+
+    best_name = max(results, key=lambda k: results[k]["metrics"].get(sel_metric, 0))
+    best      = results[best_name]
+    print(f"\n{'='*70}\nBEST: {best_name}  {sel_metric}={best['metrics'].get(sel_metric,'?')}\n{'='*70}\n")
+
+    # Scheduler-triggered: only promote if improvement exceeds threshold
+    if triggered_by != "manual":
+        _, active_entry = load_active_model()
+        threshold = AL_CFG.get("promote_threshold", 0.002)
+        if active_entry:
+            current_auc = active_entry["metrics"].get("roc_auc", 0)
+            new_auc     = best["metrics"].get("roc_auc", 0)
+            if new_auc < current_auc + threshold:
+                msg = (f"New AUC {new_auc:.4f} vs current {current_auc:.4f} "
+                       f"(threshold +{threshold}). Skipping promotion.")
+                print(f"[AutoLearn] {msg}")
+                _append_log({
+                    "timestamp": datetime.now().isoformat(), "triggered_by": triggered_by,
+                    "result": "skipped", "reason": msg, "best_model": best_name,
+                    "new_auc": new_auc, "current_auc": current_auc, "dataset_size": len(data),
+                })
+                return None # graceful skip without promotion.
+
+    version = register_model(
+        model_name=best_name, model_obj=best["model"],
+        metrics=best["metrics"], feature_names=feature_names, training_size=len(X_tr),
     )
 
-    print(f"Training set: {len(ex_train)} samples")
-    print(f"Test set: {len(ex_test)} samples")
-    print()
-
-    # Define models
-    models = {
-        'Logistic Regression': LogisticRegression(max_iter=1000, random_state=42),
-        'Random Forest': RandomForestClassifier(n_estimators=100, random_state=42),
-        'Linear Regression (Thresholded)': LinearRegression()
+    comparison = {
+        n: {k: v for k, v in r["metrics"].items() if k != "feature_importances"}
+        for n, r in results.items()
     }
+    snap = {
+        "version": version, "trained_at": datetime.now().isoformat(),
+        "best_model": best_name, "selection_metric": sel_metric,
+        "results": comparison,
+        "feature_importances": {n: r["metrics"].get("feature_importances",{}) for n,r in results.items()},
+        "triggered_by": triggered_by, "dataset_size": len(data),
+    }
+    comp_file = MODELS_DIR / f"comparison_{version}.json"
+    with open(comp_file, "w") as f: json.dump(_sanitize(snap), f, indent=2)
+    import shutil
+    shutil.copy(comp_file, MODELS_DIR / "latest_comparison.json")
 
-    results = {}
+    _append_log({
+        "timestamp": datetime.now().isoformat(), "triggered_by": triggered_by,
+        "result": "promoted", "version": version, "model_name": best_name,
+        "roc_auc": best["metrics"].get("roc_auc",0), "f1": best["metrics"]["f1"],
+        "accuracy": best["metrics"]["accuracy"], "dataset_size": len(data),
+    })
+    print(f"[Train] Registered & promoted → {version}")
+    return {"version": version, "model_name": best_name, "metrics": best["metrics"]}
+    # this is what happens when you let your code get out of hand and you just want to
+    # be able to return something from the training function without breaking the scheduler
+    # so you return a big dictionary of stuff that you might want to inspect later.
 
-    # Train and evaluate each model
-    for model_name, model in models.items():
-        print(f"Training {model_name}...")
-        model.fit(ex_train, y_train)
+# AUTO-LEARNING SCHEDULER
 
-        # Make predictions
-        if model_name == 'Linear Regression (Thresholded)':
-            # Convert continuous output to binary classification
-            y_pred_continuous = model.predict(ex_test)
-            y_pred = (y_pred_continuous >= 0.5).astype(int)
-        else:
-            y_pred = model.predict(ex_test)
+class AutoLearnScheduler:
+    """
+    Background thread.  Every fetch_interval_hours:
+      1. Pulls new games from ESPN
+      2. If ≥ min_new_games were added → retrain immediately
+    Every retrain_interval_hours regardless:
+      3. Full retrain
+    New model only replaces current if AUC improves by promote_threshold.
+    """
 
-        # Calculate metrics
-        accuracy = accuracy_score(y_test, y_pred)
-        precision = precision_score(y_test, y_pred, zero_division=0)
-        recall = recall_score(y_test, y_pred, zero_division=0)
-        f1 = f1_score(y_test, y_pred, zero_division=0)
+    def __init__(self, storage="local"):
+        self.storage          = storage
+        self.fetch_interval   = AL_CFG.get("fetch_interval_hours", 6)   * 3600
+        self.retrain_interval = AL_CFG.get("retrain_interval_hours", 24) * 3600
+        self.min_new_games    = AL_CFG.get("min_new_games_to_retrain", 15)
+        self._thread          = None
+        self._stop            = threading.Event()
+        self._last_fetch      = 0.0
+        self._last_retrain    = 0.0
+        self._status          = "idle"
+        # self._torture_test = 0  # for testing: force fetch/retrain on next loop
 
-        results[model_name] = {
-            'model': model,
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1': f1
+    def start(self):
+        if not AL_CFG.get("enabled", True):
+            print("[AutoLearn] Disabled in config.")
+            return
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        print(f"[AutoLearn] Scheduler started — "
+              f"fetch every {self.fetch_interval//3600}h, "
+              f"retrain every {self.retrain_interval//3600}h.")
+
+    def stop(self):
+        self._stop.set()
+
+    def _loop(self): #bruh
+        time.sleep(60)  # let Flask finish starting
+        while not self._stop.is_set():
+            now = time.time()
+            try:
+                if now - self._last_fetch >= self.fetch_interval:
+                    self._status = "fetching"
+                    print("[AutoLearn] Fetching new games...")
+                    new_games = fetch_ncaa_data()
+                    added = append_to_json(new_games) if new_games else 0
+                    self._last_fetch = time.time()
+                    print(f"[AutoLearn] {added} new games added.")
+
+                    if added >= self.min_new_games:
+                        self._status = "training"
+                        print(f"[AutoLearn] {added} new games → retraining...")
+                        train_and_evaluate(self.storage, triggered_by="new_data")
+                        self._last_retrain = time.time()
+
+                elif now - self._last_retrain >= self.retrain_interval:
+                    self._status = "training"
+                    print("[AutoLearn] Scheduled retrain...")
+                    train_and_evaluate(self.storage, triggered_by="scheduler")
+                    self._last_retrain = time.time()
+
+            except Exception as e:
+                print(f"[AutoLearn] Error: {e}")
+                traceback.print_exc()
+            finally:
+                self._status = "idle"
+
+            for _ in range(60):           # check stop every minute
+                if self._stop.is_set(): break
+                time.sleep(60)
+
+    def get_state(self) -> dict:
+        def countdown(last, interval):
+            rem = max(0, int(last + interval - time.time()))
+            h, m = divmod(rem // 60, 60)
+            return f"{h}h {m}m" if h else f"{m}m"
+        return {
+            "enabled":            AL_CFG.get("enabled", True),
+            "status":             self._status,
+            "fetch_interval_h":   self.fetch_interval   // 3600,
+            "retrain_interval_h": self.retrain_interval // 3600,
+            "min_new_games":      self.min_new_games,
+            "promote_threshold":  AL_CFG.get("promote_threshold", 0.002),
+            "next_fetch_in":      countdown(self._last_fetch,   self.fetch_interval),
+            "next_retrain_in":    countdown(self._last_retrain, self.retrain_interval),
+            "last_fetch":    datetime.fromtimestamp(self._last_fetch).isoformat()   if self._last_fetch   else None,
+            "last_retrain":  datetime.fromtimestamp(self._last_retrain).isoformat() if self._last_retrain else None,
+            # "torture_test": self._torture_test,  # for testing: expose the variable that forces fetch/retrain
         }
 
-        print(f"  Accuracy:  {accuracy:.4f}")
-        print(f"  Precision: {precision:.4f}")
-        print(f"  Recall:    {recall:.4f}")
-        print(f"  F1-Score:  {f1:.4f}")
-        print()
-
-    # Select best model based on F1-score
-    # linear regression may be chosen more often due to thresholding, consider that in future versions.
-    # all models are different in nature, so f1 may not be the best metric for all.
-    best_model_name = max(results, key=lambda k: results[k]['f1'])
-    best_model = results[best_model_name]['model']
-
-    print("=" * 70)
-    print(f"BEST MODEL: {best_model_name}")
-    print(f"F1-Score: {results[best_model_name]['f1']:.4f}")
-    print("=" * 70)
-    print()
-
-    # Save best model
-    with open(MODEL_FILE, 'wb') as f:
-        pickle.dump(best_model, f)  # type: ignore
-
-    # Save model info
-    model_info = {
-        'model_name': best_model_name,
-        'accuracy': results[best_model_name]['accuracy'],
-        'precision': results[best_model_name]['precision'],
-        'recall': results[best_model_name]['recall'],
-        'f1': results[best_model_name]['f1'],
-        'trained_at': datetime.now().isoformat()
-    }
-
-    with open(MODEL_INFO_FILE, 'w') as f:
-        json.dump(model_info, f, indent=2)
-
-    print(f"Model saved to {MODEL_FILE}")
-    print(f"Model info saved to {MODEL_INFO_FILE}")
-
-    # Save model comparison data for dashboard
-    comparison_data = {}
-    for model_name, result in results.items():
-        comparison_data[model_name] = {
-            'accuracy': result['accuracy'],
-            'precision': result['precision'],
-            'recall': result['recall'],
-            'f1': result['f1']
-        }
-
-    with open(MODEL_COMPARISON_FILE, 'w') as f:
-        json.dump(comparison_data, f, indent=2)
-
-    print(f"Model comparison saved to {MODEL_COMPARISON_FILE}")
+# please do not use this for live gambling.... speaking from experience
+# lost 2 bags of chips to it lol
+_scheduler = AutoLearnScheduler()
 
 
+# FLASK
 
-# PREDICTION SERVER
+# this is a band-aid for the fact that some of our metrics might be NaN or Inf, which json.dumps cannot serialize.
+# It will replace those with None so the dashboard doesn't break when it tries to display them.
+# Yes, this is a hack, but it's a better user experience than a broken dashboard.
+# I will refactor this later, but for now, it does the job.
+def _sanitize(obj):
+    """Recursively replace float NaN/Inf with None so json.dumps produces valid JSON."""
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, float) and (obj != obj or obj == float('inf') or obj == float('-inf')):
+        return None
+    return obj
 
-# dashboard will be a simple HTML file served at root
-# API endpoint /predict will accept JSON input and return prediction
+
 app = Flask(__name__)
 
 
-def load_model():
-    """Load the trained model."""
-    if not os.path.exists(MODEL_FILE):
-        return None, None
-
-    with open(MODEL_FILE, 'rb') as f:
-        model = pickle.load(f)
-
-    if os.path.exists(MODEL_INFO_FILE):
-        with open(MODEL_INFO_FILE, 'r') as f:
-            model_info = json.load(f)
-    else:
-        model_info = {'model_name': 'Unknown'}
-
-    return model, model_info
+@app.route("/")
+def serve_dashboard():
+    return send_file("dashboard.html")
 
 
-@app.route('/')
-def home():
-    """Serve the dashboard."""
-    return send_file('dashboard.html')
-
-
-@app.route('/predict', methods=['POST'])
+@app.route("/predict", methods=["POST"])
 def predict():
-    """Make a prediction."""
-    model, model_info = load_model()
-
+    model, entry = load_active_model()
     if model is None:
-        return jsonify({
-            'error': 'No trained model found. Run --train first.'
-        }), 400
-
+        return jsonify({"error": "No trained model. Run --train first."}), 400
     try:
-        data = request.json
-
-        # Extract features
-        features = [
-            float(data['home_ppg']),
-            float(data['away_ppg']),
-            float(data['home_fg_pct']),
-            float(data['away_fg_pct']),
-            float(data['home_rebounds']),
-            float(data['away_rebounds']),
-            float(data['home_assists']),
-            float(data['away_assists']),
-            float(data['home_turnovers']),
-            float(data['away_turnovers'])
-        ]
-
-        ex = np.array([features])
-
-        # Make prediction
-        if 'Linear Regression' in model_info['model_name']:
-            prediction_continuous = model.predict(ex)[0]
-            prediction = int(prediction_continuous >= 0.5)
-            confidence = abs(prediction_continuous - 0.5) * 2  # Scale to 0-1
-        else:
-            prediction = int(model.predict(ex)[0])
-
-            # Get probability if available
-            if hasattr(model, 'predict_proba'):
-                probabilities = model.predict_proba(ex)[0]
-                confidence = float(max(probabilities))
-            else:
-                confidence = None
-
-        result = {
-            'prediction': 'Home Win' if prediction == 1 else 'Away Win',
-            'prediction_value': prediction,
-            'confidence': confidence,
-            'model_name': model_info['model_name']
-        }
-
-        return jsonify(result)
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 400
-
-
-@app.route('/analytics', methods=['GET'])
-def get_analytics():
-    """Get analytics data for dashboard visualizations."""
-    try:
-        # Load data from local JSON only
-        if not os.path.exists(LOCAL_DATA_FILE):
-            return jsonify({'error': 'No data available. Run: python main.py --generate --storage local'}), 400
-
-        with open(LOCAL_DATA_FILE, 'r') as f:
-            data = json.load(f)
-
-        if len(data) == 0:
-            return jsonify({'error': 'Data file is empty'}), 400
-
-        # Calculate statistics
-        total_games = len(data)
-        home_wins = sum(1 for game in data if game['outcome'] == 1)
-        away_wins = total_games - home_wins
-        home_win_rate = home_wins / total_games if total_games > 0 else 0
-
-        # Calculate feature averages by outcome
-        home_win_games = [game for game in data if game['outcome'] == 1]
-        away_win_games = [game for game in data if game['outcome'] == 0]
-
-        features = ['home_ppg', 'away_ppg', 'home_fg_pct', 'away_fg_pct',
-                    'home_rebounds', 'away_rebounds', 'home_assists', 'away_assists',
-                    'home_turnovers', 'away_turnovers']
-
-        feature_stats = {'home_win': {}, 'away_win': {}}
-
-        for feature in features:
-            if home_win_games:
-                feature_stats['home_win'][feature] = round(
-                    sum(g[feature] for g in home_win_games) / len(home_win_games), 2
-                )
-            else:
-                feature_stats['home_win'][feature] = 0
-
-            if away_win_games:
-                feature_stats['away_win'][feature] = round(
-                    sum(g[feature] for g in away_win_games) / len(away_win_games), 2
-                )
-            else:
-                feature_stats['away_win'][feature] = 0
-
-        # Load model comparison data
-        model_comparison = {}
-        if os.path.exists(MODEL_COMPARISON_FILE):
-            with open(MODEL_COMPARISON_FILE, 'r') as f:
-                model_comparison = json.load(f)
-        else:
-            # Placeholder data
-            model_comparison = {
-                'Logistic Regression': {'accuracy': 0, 'precision': 0, 'recall': 0, 'f1': 0},
-                'Random Forest': {'accuracy': 0, 'precision': 0, 'recall': 0, 'f1': 0},
-                'Linear Regression (Thresholded)': {'accuracy': 0, 'precision': 0, 'recall': 0, 'f1': 0}
-            }
-
+        payload       = request.json
+        feature_names = entry.get("feature_names", DATA_CFG["features"])
+        X             = np.array([[float(payload[f]) for f in feature_names]])
+        pred          = int(model.predict(X)[0])
+        conf          = float(max(model.predict_proba(X)[0])) if hasattr(model, "predict_proba") else None
         return jsonify({
-            'total_games': total_games,
-            'home_wins': home_wins,
-            'away_wins': away_wins,
-            'home_win_rate': round(home_win_rate, 4),
-            'feature_stats': feature_stats,
-            'model_comparison': model_comparison
+            "prediction":       "Home Win" if pred == 1 else "Away Win",
+            "prediction_value": pred,
+            "confidence":       conf,
+            "model_name":       entry["model_name"],
+            "version":          entry["version"],
         })
-
+    except KeyError as e:
+        return jsonify({"error": f"Missing feature: {e}"}), 400
     except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        print(f"Analytics error: {error_details}")
-        return jsonify({'error': str(e)}), 400
+        return jsonify({"error": str(e)}), 400
 
 
-@app.route('/model_info', methods=['GET'])
-def get_model_info():
-    """Get information about the current model."""
-    _, model_info = load_model()
+@app.route("/analytics")
+def analytics():
+    try:
+        data = load_from_json()
+        if not data:
+            return jsonify({"error": "No data."}), 400
+        total      = len(data)
+        home_wins  = sum(1 for g in data if g.get("outcome") == 1)
+        cfg_feats  = DATA_CFG["features"]
+        hw_games   = [g for g in data if g.get("outcome") == 1]
+        aw_games   = [g for g in data if g.get("outcome") == 0]
+        def avg(games, field):
+            v = [g[field] for g in games if field in g]; return round(sum(v)/len(v),4) if v else 0
+        comp_file = MODELS_DIR / "latest_comparison.json"
+        mc = fi = {}
+        if comp_file.exists():
+            with open(comp_file) as f: c = json.load(f)
+            mc = c.get("results",{}); fi = c.get("feature_importances",{})
+        sources = {}
+        for g in data: sources[g.get("source","unknown")] = sources.get(g.get("source","unknown"),0)+1
+        return jsonify(_sanitize({
+            "total_games": total, "home_wins": home_wins, "away_wins": total-home_wins,
+            "home_win_rate": round(home_wins/total,4) if total else 0,
+            "feature_stats": {
+                "home_win": {feat: avg(hw_games, feat) for feat in cfg_feats},
+                "away_win": {feat: avg(aw_games, feat) for feat in cfg_feats},
+            },
+            "model_comparison": mc, "feature_importances": fi, "data_sources": sources,
+        }))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    if model_info is None:
-        return jsonify({'error': 'No model info available'}), 400
 
-    return jsonify(model_info)
+@app.route("/model_info")
+def model_info():
+    _, entry = load_active_model()
+    if entry is None: return jsonify({"error": "No active model."}), 400
+    return jsonify(entry)
 
 
+@app.route("/registry")
+def registry():
+    return jsonify(_load_registry())
 
-# MAIN
 
-# Command-line interface to run different parts of the system
-# Various options: generate data, fetch API data, train models, start server
-# improve CLI in future versions with subcommands but for now this is sufficient
-# inefficient but works for now
+@app.route("/registry/activate/<version>", methods=["POST"])
+def activate_version(version):
+    if set_active_version(version):
+        return jsonify({"status": "ok", "active_version": version})
+    return jsonify({"error": f"Version {version} not found."}), 404
+
+
+@app.route("/debug")
+def debug():
+    """Quick health check — open this in the browser to diagnose blank dashboard."""
+    data = load_from_json()
+    comp_file = MODELS_DIR / "latest_comparison.json"
+    _, entry = load_active_model()
+    return jsonify({
+        "data_file":          str(LOCAL_FILE),
+        "data_file_exists":   LOCAL_FILE.exists(),
+        "game_count":         len(data),
+        "comparison_exists":  comp_file.exists(),
+        "active_model":       entry.get("model_name") if entry else None,
+        "active_version":     entry.get("version") if entry else None,
+        "registry_file":      str(REGISTRY_FILE),
+        "registry_exists":    REGISTRY_FILE.exists(),
+        "models_dir":         str(MODELS_DIR),
+        "cwd":                os.getcwd(),
+    }) # small sanity check endpoint to help debug common issues like "why is my dashboard blank?"
+       # it was a constant issue
+
+
+@app.route("/features")
+def features():
+    return jsonify({"features": DATA_CFG["features"]})
+
+
+# TEAM ENDPOINTS
+
+@app.route("/teams")
+def teams():
+    data = load_from_json()
+    if not data: return jsonify({"error": "No data."}), 400
+    ts = build_team_stats(data)
+    teams_list = sorted(
+        [{"name": n, **s} for n, s in ts.items() if s.get("games_played",0) >= 3],
+        key=lambda x: x["name"]
+    )
+    return jsonify({"teams": teams_list, "count": len(teams_list)})
+
+
+@app.route("/team_stats/<path:team_name>")
+def team_stats(team_name):
+    data = load_from_json()
+    if not data: return jsonify({"error": "No data."}), 400
+    ts = build_team_stats(data)
+    if team_name in ts:
+        return jsonify({"name": team_name, "stats": ts[team_name]})
+    matches = [k for k in ts if team_name.lower() in k.lower()]
+    if matches:
+        return jsonify({"name": matches[0], "stats": ts[matches[0]]})
+    return jsonify({"error": f"Team '{team_name}' not found."}), 404
+    # graceful as f**k
+
+
+@app.route("/home_team")
+def home_team_endpoint():
+    data = load_from_json()
+    cfg  = {"name": HT_CFG["name"], "court": HT_CFG.get("court_name",""), "espn_id": HT_CFG.get("espn_id","")}
+    ht   = get_home_team_stats(data) if data else None
+    return jsonify({"config": cfg, "stats": ht})
+
+
+# AUTO-LEARN ENDPOINTS
+
+@app.route("/autolearn/status")
+def autolearn_status():
+    return jsonify(_scheduler.get_state())
+
+
+@app.route("/autolearn/trigger", methods=["POST"])
+def autolearn_trigger():
+    def _run(): train_and_evaluate("local", triggered_by="manual_trigger")
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"status": "started"})
+
+
+@app.route("/learning_log")
+def learning_log():
+    n   = request.args.get("n", 50, type=int)
+    log = _load_log()
+    return jsonify({"log": log[-n:], "total": len(log)})
+
+
+# CLI
+
 def main():
-    parser = argparse.ArgumentParser(
-        description='Basketball Game Outcome Prediction System'
-    )
-    parser.add_argument(
-        '--generate',
-        action='store_true',
-        help='Generate initial synthetic data'
-    )
-    parser.add_argument(
-        '--fetch-api',
-        action='store_true',
-        help='Fetch/simulate new season data and append'
-    )
-    parser.add_argument(
-        '--train',
-        action='store_true',
-        help='Train and evaluate all models, select best'
-    )
-    parser.add_argument(
-        '--serve',
-        action='store_true',
-        help='Start the prediction web server'
-    )
-    parser.add_argument(
-        '--storage',
-        choices=['local', 'snowflake'],
-        default='local',
-        help='Storage backend (local JSON or Snowflake)'
-    )
-
+    parser = argparse.ArgumentParser(description="Basketball Predictor v2.1")
+    parser.add_argument("--fetch",              action="store_true")
+    parser.add_argument("--generate-synthetic", action="store_true")
+    parser.add_argument("--train",              action="store_true")
+    parser.add_argument("--serve",              action="store_true")
+    parser.add_argument("--storage", choices=["local","snowflake"], default="local")
+    parser.add_argument("--activate", metavar="VERSION")
+    parser.add_argument("--list-models",        action="store_true")
+    parser.add_argument("--config", default="config.yaml")
+    # parser.add_argument("--torture-test", action="store_true", help="Force the auto-learn scheduler to fetch and retrain on the next loop (for testing)")
     args = parser.parse_args()
 
-    if args.generate:
-        data = generate_synthetic_data(num_games=500)
-        if args.storage == 'local':
-            save_to_json(data)
-        else:
-            save_to_snowflake(data)
+    if args.list_models:
+        reg = _load_registry()
+        if not reg["versions"]: print("No registered models."); return
+        print(f"\n{'Ver':<6} {'Model':<28} {'AUC':<8} {'F1':<8} Trained At")
+        print("-"*70)
+        for v in reg["versions"]:
+            m = v["metrics"]
+            active = " ◀ ACTIVE" if v["version"] == reg["active_version"] else ""
+            print(f"{v['version']:<6} {v['model_name']:<28} "
+                  f"{m.get('roc_auc',0):.4f}   {m.get('f1',0):.4f}   "
+                  f"{v['trained_at'][:19]}{active}")
+        return
 
-    elif args.fetch_api:
-        new_data = simulate_api_fetch(num_new_games=100)
-        if args.storage == 'local':
-            append_to_json(new_data)
-        else:
-            append_to_snowflake(new_data)
+    if args.activate:
+        ok = set_active_version(args.activate)
+        print(f"Active → {args.activate}" if ok else f"Version {args.activate} not found.")
+        return
 
-    elif args.train:
-        train_and_evaluate_models(args.storage)
+    if args.fetch:
+        games = fetch_ncaa_data()
+        if games:
+            append_to_snowflake(games) if args.storage == "snowflake" else append_to_json(games)
+        return
 
-    elif args.serve:
-        print("\n" + "=" * 70)
-        print("STARTING PREDICTION SERVER")
-        print("=" * 70)
-        print("Dashboard available at: http://localhost:5000")
-        print("Press Ctrl+C to stop the server")
-        print("=" * 70 + "\n") # start server and listen on port 5000
-        app.run(debug=True, port=5000)
+    if args.generate_synthetic:
+        data = _generate_synthetic(500)
+        save_to_snowflake(data) if args.storage == "snowflake" else save_to_json(data)
+        return
 
-    else:
-        parser.print_help()
+    if args.train:
+        train_and_evaluate(args.storage, triggered_by="manual")
+        return
+
+    if args.serve:
+        print(f"\n{'='*70}")
+        print(f"  {APP_CFG['name']}  v{APP_CFG['version']}")
+        print(f"  Dashboard  → http://localhost:{APP_CFG['port']}")
+        print(f"  Home team  : {HT_CFG['name']}")
+        print(f"  Auto-learn : {'ON' if AL_CFG.get('enabled') else 'OFF'}")
+        print(f"{'='*70}\n")
+        _scheduler.storage = args.storage
+        _scheduler.start()
+        app.run(debug=APP_CFG.get("debug", False),
+                port=APP_CFG.get("port", 5000),
+                host=APP_CFG.get("host", "0.0.0.0"),
+                use_reloader=False)
+        return
+
+    parser.print_help()
 
 
-if __name__ == '__main__':
+# SYNTHETIC FALLBACK
+
+# backup plan
+def _generate_synthetic(num_games=500):
+    rng       = np.random.default_rng(42)
+    home_name = HT_CFG["name"]
+    pool      = [home_name] + [f"Team_{i}" for i in range(1, 65)]
+    data      = []
+    for i in range(num_games):
+        ht = pool[i % len(pool)]
+        at = pool[(i*7+3) % len(pool)]
+        if ht == at: at = pool[(i*7+4) % len(pool)]
+
+        hp,ap   = rng.uniform(60,95,2)
+        hfg,afg = rng.uniform(0.38,0.55,2)
+        h3,a3   = rng.uniform(0.28,0.42,2)
+        hrb,arb = rng.uniform(28,48,2)
+        ha,aa   = rng.uniform(10,22,2)
+        ht_,at_ = rng.uniform(8,17,2)
+        hst,ast = rng.uniform(4,10,2)
+        hbl,abl = rng.uniform(2,8,2)
+
+        h_str = hp*0.3+hfg*80+h3*40+hrb*0.5+ha*0.8-ht_*0.6+hst*0.4+3
+        a_str = ap*0.3+afg*80+a3*40+arb*0.5+aa*0.8-at_*0.6+ast*0.4
+        outcome = (1 if h_str>a_str else 0) if rng.random()>0.15 else (0 if h_str>a_str else 1)
+
+        data.append({
+            "game_id": f"SYN_{i+1:05d}", "home_team": ht, "away_team": at,
+            "home_ppg":round(float(hp),2),       "away_ppg":round(float(ap),2),
+            "home_fg_pct":round(float(hfg),4),   "away_fg_pct":round(float(afg),4),
+            "home_3p_pct":round(float(h3),4),    "away_3p_pct":round(float(a3),4),
+            "home_rebounds":round(float(hrb),2), "away_rebounds":round(float(arb),2),
+            "home_assists":round(float(ha),2),   "away_assists":round(float(aa),2),
+            "home_turnovers":round(float(ht_),2),"away_turnovers":round(float(at_),2),
+            "home_steals":round(float(hst),2),   "away_steals":round(float(ast),2),
+            "home_blocks":round(float(hbl),2),   "away_blocks":round(float(abl),2),
+            "outcome":int(outcome), "source":"synthetic",
+        })
+    print(f"[Synthetic] Generated {len(data)} games.")
+    return data # linear data generation with some noise to create a somewhat learnable pattern.
+
+
+if __name__ == "__main__":
     main()
-# Current status: "Monke see monke do" level.
-# live data to make monke smart is remaining.
 
-# coffee log 4 -> 5
+# Current status: "Gave Ceaser that intelligence boost drug" level.
+# live data is done.
+# much better than before, but still a long way to go.
+
+# coffee log 17 -> 18
