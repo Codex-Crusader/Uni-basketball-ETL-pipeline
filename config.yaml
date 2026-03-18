@@ -1,15 +1,13 @@
 app:
   name: "Basketball Game Outcome Predictor"
-  version: "2.1.0"
+  version: "2.2.0"
   debug: true
   port: 5000
   host: "0.0.0.0"
 
-
 # HOME TEAM — the team this instance "roots for"
 # All predictions are framed as: home_team vs <chosen opponent>
 # Stats are auto-filled from their season averages in the dataset
-
 home_team:
   name: "Duke Blue Devils"       # Change to your team
   espn_id: "150"                 # ESPN team ID (150 = Duke). Used for direct team lookups.
@@ -19,7 +17,6 @@ home_team:
 # AUTO-LEARNING SCHEDULER
 # Runs in the background when --serve is active.
 # Fetches new games → retrains → promotes only if model improves.
-
 auto_learn:
   enabled: true
   fetch_interval_hours: 6        # How often to check for new games
@@ -30,7 +27,6 @@ auto_learn:
 
 
 # DATA STORAGE
-
 data:
   dir: "data"
   local_file: "data/games.json"
@@ -58,7 +54,6 @@ data:
   # Label column
   label: "outcome"
 
-
 # NCAA API — ESPN (no key required, unofficial)
 # Switch provider to "custom" and fill custom block for your own API
 
@@ -73,6 +68,8 @@ ncaa_api:
     scoreboard_path: "/scoreboard"
     summary_path: "/summary"
     page_size: 25
+    teams_path: "/teams"
+    athletes_path: "/athletes"
 
   # Fill this block when using your own API
   custom:
@@ -91,7 +88,6 @@ ncaa_api:
 
 # SNOWFLAKE  (keep disabled until credentials are available)
 # Set env vars SNOWFLAKE_USER / SNOWFLAKE_PASSWORD for safety
-
 snowflake:
   enabled: false
   user: ""                   # or env SNOWFLAKE_USER
@@ -102,8 +98,20 @@ snowflake:
   schema: ""
   table: "BASKETBALL_GAMES"
 
-# MODEL REGISTRY & VERSIONING
+# ROSTER — ESPN player roster fetching and caching
+roster:
+  cache_dir: "data/rosters"
+  team_id_cache: "data/team_ids.json"
+  cache_ttl_hours: 24        # Re-fetch roster after this many hours
+  min_players_to_show: 5     # Minimum players needed to show roster panel
 
+
+# ROLLING STATS — last-N-games averages
+rolling:
+  default_window: 12
+  available_windows: [5, 10, 15, 20]
+
+# MODEL REGISTRY & VERSIONING
 models:
   dir: "models"
   registry_file: "models/registry.json"
