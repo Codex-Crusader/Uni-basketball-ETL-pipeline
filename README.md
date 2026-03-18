@@ -11,12 +11,13 @@
 <details>
 <summary>View Dashboard Screenshots</summary>
 
-![Dashboard 1](images/dashboard_1.png)
-![Dashboard 2](images/dashboard_2.png)
-![Dashboard 3](images/dashboard_3.png)
-![Dashboard 4](images/dashboard_4.png)
-![Dashboard 5](images/dashboard_5.png)
-![Dashboard 6](images/dashboard_6.png)
+![Dashboard 1](images/dashboard_@1.png)
+![Dashboard 2](images/dashboard_@2.png)
+![Dashboard 3](images/dashboard_2.png)
+![Dashboard 4](images/dashboard_3.png)
+![Dashboard 5](images/dashboard_4.png)
+![Dashboard 6](images/dashboard_5.png)
+![Dashboard 7](images/dashboard_6.png)
 </details>
 
 ---
