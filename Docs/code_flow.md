@@ -14,13 +14,14 @@
 6. [Storage Architecture](#storage-architecture)
 7. [Model Training Pipeline](#model-training-pipeline)
 8. [Prediction Serving](#prediction-serving)
-9. [Dashboard Integration](#dashboard-integration)
+9. [Roster System](#roster-system)
+10. [Dashboard Integration](#dashboard-integration)
 
 ---
 
 ## 🏛️ System Overview
 
-The basketball predictor is built as a **config-driven, self-improving ML pipeline** with six operational modes and a background auto-learn scheduler.
+The basketball predictor is built as a **config-driven, self-improving ML pipeline** with seven operational modes and a background auto-learn scheduler.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -32,11 +33,11 @@ The basketball predictor is built as a **config-driven, self-improving ML pipeli
                      │
           Command Line Arguments Parser
                      │
-    ┌────────┬────────┼────────┬────────┬────────┐
-    │        │        │        │        │        │
-    ▼        ▼        ▼        ▼        ▼        ▼
-[--fetch] [--gen  [--train] [--serve] [--list [--activate
-         synth]                      models]   VERSION]
+    ┌────────┬────────┼────────┬────────┬────────┬────────┐
+    │        │        │        │        │        │        │
+    ▼        ▼        ▼        ▼        ▼        ▼        ▼
+[--fetch] [--fetch [--gen  [--train] [--serve] [--list [--activate
+         -rosters] synth]                      models]   VERSION]
 ```
 
 ### Design Philosophy
@@ -56,14 +57,16 @@ The basketball predictor is built as a **config-driven, self-improving ML pipeli
 **Function:** `load_config(path)` — runs at module import time
 
 ```python
-CFG        = load_config()
-APP_CFG    = CFG["app"]
-HT_CFG     = CFG["home_team"]       # Duke Blue Devils, court, ESPN ID
-DATA_CFG   = CFG["data"]            # features list, paths, split sizes
-API_CFG    = CFG["ncaa_api"]        # ESPN endpoints, season, rate limit
-SF_CFG     = CFG["snowflake"]       # credentials via env vars
-MODEL_CFG  = CFG["models"]          # enabled models + hyperparams
-AL_CFG     = CFG["auto_learn"]      # intervals, thresholds
+CFG         = load_config()
+APP_CFG     = CFG["app"]
+HT_CFG      = CFG["home_team"]       # Duke Blue Devils, court, ESPN ID
+DATA_CFG    = CFG["data"]            # features list, paths, split sizes
+API_CFG     = CFG["ncaa_api"]        # ESPN endpoints, season, rate limit
+SF_CFG      = CFG["snowflake"]       # credentials via env vars
+MODEL_CFG   = CFG["models"]          # enabled models + hyperparams
+AL_CFG      = CFG["auto_learn"]      # intervals, thresholds
+ROSTER_CFG  = CFG.get("roster", {})  # cache dir, TTL, team_id cache path
+ROLLING_CFG = CFG.get("rolling", {}) # available windows, default window
 ```
 
 Every subsequent function reads from these module-level dicts. Changing any setting requires only a `config.yaml` edit.
@@ -78,6 +81,7 @@ Every subsequent function reads from these module-level dicts. Changing any sett
 
 ```bash
 --fetch                # Fetch real NCAA games from ESPN API
+--fetch-rosters        # Pre-fetch and cache rosters for all teams in dataset
 --generate-synthetic   # Generate synthetic fallback data (500 games)
 --train                # Train all models, register best by ROC-AUC
 --serve                # Start Flask + auto-learn scheduler
@@ -90,7 +94,7 @@ Every subsequent function reads from these module-level dicts. Changing any sett
 
 ### Layer 2: Data Ingestion
 
-#### ESPN API (`ESPNFetcher`)
+#### ESPN Game Data (`ESPNFetcher`)
 
 Real NCAA data, no API key required.
 
@@ -152,9 +156,11 @@ Snowflake is disabled by default (`enabled: false` in config). Enable by setting
 
 ### Layer 4: Team Stats Engine
 
-**Function:** `build_team_stats(data)`
+**Function:** `build_team_stats(data, window=None)`
 
-This is what powers the predict form's auto-fill. For every game in the dataset, each team's stats are accumulated regardless of whether they were home or away:
+This is what powers the predict form's auto-fill. For every game in the dataset, each team's stats are accumulated regardless of whether they were home or away.
+
+**Rolling window support:** If `window` is set, only the most recent N games per team are used (sorted by `fetched_at` descending). `None` means full season average. The `/teams` and `/team_stats/<name>` endpoints accept a `?window=N` query param that is passed directly through to this function.
 
 ```
 For each game:
@@ -162,14 +168,15 @@ For each game:
   Home team → accumulate away_* columns (mirrored) under their home_* keys
   Away team → same logic, mirrored
 
-For each team:
-  Average all accumulated values → season average per feature
-  Count games_played, wins
+Per team:
+  Sort games newest-first → slice to window (or keep all)
+  Average all accumulated values → season/window average per feature
+  Count games_played (total, not windowed), games_in_window, wins
 ```
 
 This means Duke's `home_ppg` stat represents their average points scored per game — not just when they were the home side. The feature names remain `home_*` / `away_*` because that's what the model was trained on; they represent "the team filling the home slot" vs "the team filling the away slot" in a prediction.
 
-**`get_home_team_stats(data)`:** Fuzzy-matches the configured home team name and returns their stats dict. Used by the `/home_team` endpoint to pre-fill the prediction form.
+**`get_home_team_stats(data, window=None)`:** Fuzzy-matches the configured home team name and returns their stats dict. Used by the `/home_team` endpoint to pre-fill the prediction form.
 
 ---
 
@@ -188,7 +195,7 @@ All wrapped in `StandardScaler → estimator` Pipeline. This means scaling is pa
 | `extra_trees` | `ExtraTreesClassifier` | Randomized splits |
 | `svm` | `SVC(probability=True)` | RBF kernel |
 | `mlp` | `MLPClassifier` | 128→64→32, early stopping |
-| `xgboost` | `XGBClassifier` | Optional, graceful skip |
+| `xgboost` | `XGBClassifier` | Optional — graceful `ImportError` skip |
 
 **Training sequence:**
 
@@ -314,7 +321,49 @@ main()
 
 ---
 
-### Flow 2: `python main.py --train`
+### Flow 2: `python main.py --fetch-rosters`
+
+```
+main()
+  │
+  ├─ load_from_json() → existing game records
+  │
+  ├─ Collect unique team names from home_team + away_team fields
+  │   └─ discard empty strings
+  │
+  └─ RosterFetcher.fetch_team(name) for each team  ← blocking, not async
+      │
+      ├─ get_team_id(team_name)
+      │   ├─ Load data/team_ids.json cache
+      │   ├─ Exact match → return ID
+      │   ├─ Case-insensitive fuzzy match → return ID
+      │   ├─ Cache miss → GET /teams?limit=1000
+      │   │   └─ Parse sports[0].leagues[0].teams → build full cache
+      │   └─ Save updated cache → try exact + fuzzy again
+      │
+      ├─ _cache_valid(team_id)
+      │   └─ Check data/rosters/<team_id>.json exists + fetched_at < 24h ago
+      │
+      ├─ get_roster(team_id)
+      │   ├─ GET /teams/{id}/roster
+      │   ├─ For each athlete: extract id, name, position, jersey
+      │   └─ _parse_embedded_stats(athlete)
+      │       ├─ Read athlete.statistics[] and athlete.displayStats[]
+      │       └─ Extract ppg, rpg, apg, spg, bpg, tov, fg_pct, fgm, fga
+      │
+      ├─ For players where ppg == 0 (no embedded stats):
+      │   └─ get_player_stats(player_id)
+      │       ├─ GET /athletes/{id}/statistics
+      │       ├─ Find "avg"/"pergame" category in splits
+      │       └─ Extract same stat fields (graceful 404 handling)
+      │
+      └─ Save result → data/rosters/<team_id>.json
+          { team_name, team_id, players: [...], fetched_at }
+```
+
+---
+
+### Flow 3: `python main.py --train`
 
 ```
 main()
@@ -333,7 +382,7 @@ main()
       ├─ train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
       │   X_train: (400, 14),  X_test: (100, 14)
       │
-      ├─ build_models() → 5-6 Pipeline objects
+      ├─ build_models() → 5 (or 6) Pipeline objects
       │
       ├─ For each model:
       │   ├─ Pipeline.fit(X_train, y_train)
@@ -359,7 +408,7 @@ main()
 
 ---
 
-### Flow 3: `python main.py --serve`
+### Flow 4: `python main.py --serve`
 
 ```
 main()
@@ -430,7 +479,7 @@ This means the active model is immutable unless something genuinely better emerg
 
 ## 🔄 Data Flow
 
-### End-to-End Prediction Flow
+### End-to-End Stats-Mode Prediction Flow
 
 ```
 User opens http://localhost:5000
@@ -439,20 +488,20 @@ User opens http://localhost:5000
       │
       └─ Browser executes JS init():
           │
-          ├─ fetch("/features")     → feature list from config
-          ├─ fetch("/home_team")    → Duke stats from season averages
-          ├─ fetch("/teams")        → all teams dropdown
-          ├─ fetch("/model_info")   → active version + metrics
-          ├─ fetch("/analytics")    → stats + comparison + feature importances
-          ├─ fetch("/registry")     → all versions for Registry tab
+          ├─ fetch("/features")         → feature list + rolling window options
+          ├─ fetch("/home_team")        → Duke stats from season averages
+          ├─ fetch("/teams")            → all teams dropdown
+          ├─ fetch("/model_info")       → active version + metrics
+          ├─ fetch("/analytics")        → stats + comparison + feature importances
+          ├─ fetch("/registry")         → all versions for Registry tab
           ├─ fetch("/autolearn/status") → scheduler state
-          └─ fetch("/learning_log") → training history
+          └─ fetch("/learning_log")     → training history
 
 User selects away team from dropdown
   │
   └─ onAwayTeamChange()
-      └─ fetch("/team_stats/Kansas Jayhawks")
-          └─ build_team_stats(data) → away team season averages
+      └─ fetch("/team_stats/Kansas Jayhawks?window=12")
+          └─ build_team_stats(data, window=12) → last 12 games only
               └─ Auto-fill away stat fields (green border)
 
 User clicks "Predict"
@@ -471,6 +520,59 @@ User clicks "Predict"
       ├─ conf = max(model.predict_proba(X)[0])
       │
       └─ return { prediction, confidence, model_name, version }
+```
+
+### End-to-End Roster-Mode Prediction Flow
+
+```
+User switches to Roster mode in dashboard
+  │
+  └─ fetch("/roster/Duke Blue Devils")
+      │
+      ├─ RosterFetcher.fetch_team_async("Duke Blue Devils")
+      │   ├─ If cached and valid → write _roster_progress["Duke Blue Devils"]
+      │   │   { status: "ready", players: [...], done: N, total: N }
+      │   │   return (no thread needed)
+      │   │
+      │   └─ Else → set _roster_progress = { status: "loading", ... }
+      │       └─ threading.Thread(target=_run, daemon=True).start()
+      │           └─ fetch_team(team_name) [see --fetch-rosters flow]
+      │               └─ writes incremental progress to _roster_progress
+      │                  after each player stat fetch
+      │
+      └─ Return current _roster_progress state immediately
+
+Dashboard polls GET /roster/progress/Duke Blue Devils every 1 second
+  │
+  └─ return _roster_progress.get(team_name)
+      { status: "loading"|"ready"|"error", players: [...], done: N, total: M }
+      └─ Browser renders player cards as they appear, shows progress bar
+
+User selects players and clicks "Predict (Roster)"
+  │
+  └─ POST /predict/from_roster
+      {
+        "home_players": [ {ppg, rpg, apg, spg, bpg, tov, fg_pct, fgm, fga}, ... ],
+        "away_players": [ {...}, ... ]
+      }
+      │
+      ├─ compute_stats_from_roster(home_players, "home")
+      │   ├─ Sum ppg, rpg, apg, spg, bpg, tov across all players
+      │   ├─ FGA-weighted average for fg_pct
+      │   │   (total_fgm / total_fga; falls back to simple avg if fga = 0)
+      │   └─ Returns { home_ppg, home_fg_pct, home_rebounds, ... }
+      │
+      ├─ compute_stats_from_roster(away_players, "away") → { away_* }
+      │
+      ├─ combined = { **home_stats, **away_stats }
+      │
+      ├─ X = np.array([[combined.get(f, 0) for f in feature_names]])
+      │   (missing features filled with 0 rather than crashing)
+      │
+      ├─ pred, conf — same pipeline as stats mode
+      │
+      └─ return { prediction, confidence, computed_stats, home_count, away_count, ... }
+          └─ computed_stats shown in dashboard so user sees what numbers were used
 ```
 
 ---
@@ -511,6 +613,40 @@ User clicks "Predict"
 
 **Deduplication:** `append_to_json` builds a set of existing `game_id` values and filters new data against it before writing. Same game can never appear twice regardless of how many times `--fetch` is run.
 
+### Roster Cache
+
+**Directory:** `data/rosters/<team_id>.json`
+
+**Record structure:**
+```json
+{
+  "team_name": "Duke Blue Devils",
+  "team_id": "150",
+  "players": [
+    {
+      "id": "4432783",
+      "name": "Kyle Filipowski",
+      "position": "C",
+      "jersey": "30",
+      "ppg": 16.4,
+      "rpg": 8.1,
+      "apg": 2.3,
+      "spg": 0.8,
+      "bpg": 1.4,
+      "tov": 2.2,
+      "fg_pct": 0.517,
+      "fgm": 5.9,
+      "fga": 11.4
+    }
+  ],
+  "fetched_at": "2025-03-15T14:00:00"
+}
+```
+
+**TTL:** 24 hours by default (`roster.cache_ttl_hours` in config). `_cache_valid()` compares `fetched_at` to now.
+
+**Team ID cache:** `data/team_ids.json` maps display name → ESPN team ID. Built on first lookup and reused on all subsequent calls. Fuzzy matching (`team_name.lower() in k.lower()`) handles minor name variations.
+
 ### Snowflake (Optional)
 
 Schema auto-created from `DATA_CFG["features"]` list — adding a feature to config automatically adds it to the CREATE TABLE statement. Credentials read exclusively from environment variables.
@@ -537,24 +673,88 @@ XGBoost's cross-validation occasionally returns `NaN` when it cannot compute a C
 
 ---
 
+## 🏃 Roster System
+
+**Class:** `RosterFetcher`
+
+**ESPN endpoints used:**
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /teams?limit=1000` | All teams — builds team name → ID cache |
+| `GET /teams/{id}/roster` | Player list with embedded stats |
+| `GET /athletes/{id}/statistics` | Per-player season averages (fallback only) |
+
+**Stat extraction priority:**
+
+```
+1. athlete.statistics[] + athlete.displayStats[]  ← embedded in roster response
+   (preferred — avoids separate API calls)
+
+2. GET /athletes/{id}/statistics                  ← only for players with ppg == 0
+   (fallback — ESPN returns 404 for many players; caught gracefully)
+
+3. _empty_player_stats()                          ← all zeros / fg_pct = 0.45 default
+   (last resort — player still appears in list, just with no stats)
+```
+
+**Async pattern:**
+
+`fetch_team_async(team_name)` starts a background thread and returns immediately. The thread writes incremental progress to the module-level `_roster_progress` dict as each player is processed:
+
+```python
+_roster_progress: dict = {}   # module-level, shared between Flask threads
+
+# Progress states:
+{ "status": "loading", "players": [...so_far...], "done": 12, "total": 15 }
+{ "status": "ready",   "players": [...all...],    "done": 15, "total": 15 }
+{ "status": "error",   "players": [],             "done": 0,  "total": 0,
+  "message": "Could not fetch roster for 'Team X'." }
+```
+
+Player names appear in the dashboard immediately (from the roster endpoint before stat fetches begin), and stats fill in as the thread progresses. The dashboard polls `/roster/progress/<team>` every second until `status == "ready"`.
+
+**Aggregation (`compute_stats_from_roster`):**
+
+```
+team_ppg       = sum(player.ppg for each player)
+team_rebounds  = sum(player.rpg for each player)
+team_assists   = sum(player.apg for each player)
+team_steals    = sum(player.spg for each player)
+team_blocks    = sum(player.bpg for each player)
+team_turnovers = sum(player.tov for each player)
+
+team_fg_pct:
+  if sum(fga) > 0:  total_fgm / total_fga   ← FGA-weighted (more accurate)
+  else:             mean(player.fg_pct)       ← simple average fallback
+```
+
+Result dict uses `{side}_*` prefix (`home_*` or `away_*`) to match the model's expected feature names exactly.
+
+---
+
 ## 🌐 API Reference
 
 | Method | Endpoint | Returns |
 |--------|----------|---------|
 | GET | `/` | `dashboard.html` |
-| POST | `/predict` | prediction, confidence, version |
+| POST | `/predict` | prediction, confidence, version (stats mode) |
+| POST | `/predict/from_roster` | prediction, confidence, computed_stats, player counts |
 | GET | `/analytics` | games stats, model comparison, feature importances |
 | GET | `/model_info` | active model entry from registry |
 | GET | `/registry` | full registry JSON |
 | POST | `/registry/activate/<v>` | `{status: ok}` |
-| GET | `/features` | feature list from config |
-| GET | `/teams` | all teams with season averages |
-| GET | `/team_stats/<name>` | single team stats (fuzzy match) |
-| GET | `/home_team` | configured home team + stats |
+| GET | `/features` | feature list + rolling window options from config |
+| GET | `/teams?window=N` | all teams with season or rolling averages |
+| GET | `/team_stats/<name>?window=N` | single team stats (fuzzy match), optional window |
+| GET | `/home_team?window=N` | configured home team + stats |
+| GET | `/roster/<team_name>` | kick off async roster fetch; returns immediate progress state |
+| GET | `/roster/progress/<team_name>` | poll fetch progress: status, players so far, done/total |
+| POST | `/roster/refresh/<team_name>` | force fresh ESPN fetch (bypass 24h cache) |
 | GET | `/autolearn/status` | scheduler state + countdowns |
 | POST | `/autolearn/trigger` | starts background retrain |
 | GET | `/learning_log?n=50` | last N log entries |
-| GET | `/debug` | health check (paths, counts, active model) |
+| GET | `/debug` | health check (paths, counts, active model, roster dirs) |
 
 ---
 
@@ -606,6 +806,11 @@ switchTab(name)
 | `_sanitize()` before JSON | XGBoost CV can return NaN; invalid JSON crashes browser |
 | Lazy chart rendering | Chart.js cannot render into 0×0 hidden canvases |
 | game_id deduplication | Safe to run `--fetch` multiple times |
+| Roster embedded stats first | Avoids per-player `/statistics` calls; fewer 404s |
+| Async roster fetch + progress | Player names visible immediately; stats stream in |
+| Module-level `_roster_progress` | Shared state between Flask request thread and roster thread |
+| FGA-weighted fg_pct aggregation | More accurate than simple average when players have unequal shot volume |
+| `window=None` default in `build_team_stats` | Full season average unless caller explicitly requests rolling |
 
 ---
 
