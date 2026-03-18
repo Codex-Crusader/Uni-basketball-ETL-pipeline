@@ -30,7 +30,7 @@
 - Both backends share the same interface; switching is a single CLI flag
 
 **Models:**
-- Six models trained and compared every run: Gradient Boosting, Random Forest, Extra Trees, SVM (RBF), Neural Network (MLP), XGBoost (optional)
+- Five models trained and compared every run: Gradient Boosting, Random Forest, Extra Trees, SVM (RBF), Neural Network (MLP) — plus XGBoost as an optional sixth if installed
 - All wrapped in `StandardScaler → estimator` Pipeline — no data leakage
 - 5-fold cross-validated ROC-AUC as selection metric
 - Per-model feature importances extracted where available
@@ -53,8 +53,24 @@
 - Snowflake credentials via environment variables (`SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`)
 - Feature list, model hyperparameters, thresholds, intervals, team name all configurable
 
+**Rolling Form Window:**
+- `build_team_stats(data, window=N)` filters each team to their most recent N games by `fetched_at`
+- Available windows and default configurable in `config.yaml` under `rolling`
+- `/teams?window=N` and `/team_stats/<name>?window=N` endpoints expose this to the dashboard
+- `/features` endpoint returns available windows and the default so the dashboard can build its selector dynamically
+- `games_in_window` field returned alongside `games_played` so the dashboard can show how many games were actually used
+
+**Roster System:**
+- `--fetch-rosters` CLI flag pre-warms the cache for all teams in the dataset before serving
+- `RosterFetcher` resolves team display names to ESPN IDs, caches the mapping to `data/team_ids.json`
+- Per-team rosters cached in `data/rosters/<team_id>.json` with a configurable TTL (default 24h)
+- Embedded stats in the roster response used first; per-player `/statistics` endpoint called only for players with no embedded stats; graceful fallback to empty stats on 404
+- Roster fetches run in a background thread; dashboard polls `/roster/progress/<team>` every second and renders players incrementally as they arrive
+- `/predict/from_roster` endpoint accepts selected player lists, aggregates them into team features (FGA-weighted FG%, summed counting stats), and runs through the same model pipeline as stats mode
+- `computed_stats` returned in the response so the dashboard can show exactly what numbers the model used
+
 **Dashboard (6 tabs):**
-- **Predict:** Home team fixed (Duke), opponent picker with season-average auto-fill, confidence bar
+- **Predict:** Home team fixed (Duke), opponent picker with season-average or rolling-window auto-fill, confidence bar; roster mode lets you select individual players and aggregates their stats live before predicting
 - **Overview:** Stats cards, outcome donut, active model radar, AUC progression over versions
 - **Model Comparison:** Metrics table with inline bars, grouped bar chart, multi-model radar
 - **Feature Analysis:** Home-win vs away-win averages, per-model importance chart with selector
@@ -66,6 +82,7 @@
 - `_sanitize()` handles NaN/Inf from XGBoost CV before JSON serialization
 - Lazy chart rendering — drawn on tab switch, not page load, to avoid 0×0 canvas bug
 - `/debug` health check endpoint for diagnosing blank dashboard issues
+- Module-level `_roster_progress` dict shared between Flask and background roster threads for live progress reporting
 
 ---
 
@@ -73,13 +90,13 @@
 
 **Data:**
 - `home_ppg` / `away_ppg` = actual game score, not season rolling average (ESPN gives us the score, not a pre-computed PPG stat)
-- No rolling form window (last N games trend) per team
 - ESPN unofficial API has no SLA — could change structure without notice
+- Roster embedded stats are not always present; the per-player `/statistics` fallback endpoint returns 404 for many players
 
 **Models:**
 - No automated hyperparameter tuning (GridSearchCV / Optuna)
 - No SHAP values for explainability — importances are raw impurity-based, not Shapley
-- No model stacking or ensembling across the 6 trained models
+- No model stacking or ensembling across the trained models
 
 **Deployment:**
 - Single-instance Flask — not production-hardened (no gunicorn, no auth, no HTTPS)
@@ -102,7 +119,8 @@
 | Radar chart | ✅ Done | Single-model and multi-model radar |
 | Historical AUC progression | ✅ Done | Line chart in Overview tab |
 | Feature importance visualization | ✅ Done | Per-model horizontal bar in Features tab |
-| Last 12 matches / recent form | ⚠️ Partial | Season averages computed, but no rolling N-game window |
+| Last N matches / recent form | ✅ Done | `build_team_stats(window=N)`, `/teams?window=N`, `/team_stats/<name>?window=N`, configurable windows in `config.yaml` |
+| Player roster predictions | ✅ Done | `RosterFetcher`, async fetch + progress polling, `/predict/from_roster`, FGA-weighted aggregation |
 | PyInstaller executable | ❌ Not done | Out of scope — see below |
 | Docker container | ❌ Not done | Out of scope — see below |
 
@@ -112,20 +130,7 @@
 
 These are real improvements that would meaningfully extend the system. Unlike the original roadmap items, all of these require new work.
 
-### 1. Rolling Form Window
-
-**What:** Per-team stats computed from their last N games rather than full season average.
-
-**Why it matters:** A team on a 10-game winning streak is different from a team with the same season average built over a cold start. The predict form currently fills season averages — a rolling window would be more predictive for near-term games.
-
-**What's needed:**
-- `get_recent_stats(team_name, n=12)` function filtering `games.json` to last N games by `fetched_at`
-- Dashboard toggle: "Season avg" vs "Last 12 games" on the predict form
-- Endpoint: `/team_stats/<name>?window=12`
-
----
-
-### 2. Hyperparameter Tuning
+### 1. Hyperparameter Tuning
 
 **What:** Automated search over model hyperparameters using cross-validation.
 
@@ -139,7 +144,7 @@ These are real improvements that would meaningfully extend the system. Unlike th
 
 ---
 
-### 3. SHAP Explainability
+### 2. SHAP Explainability
 
 **What:** Replace raw feature importances with Shapley values.
 
@@ -153,7 +158,7 @@ These are real improvements that would meaningfully extend the system. Unlike th
 
 ---
 
-### 4. Executable Distribution
+### 3. Executable Distribution
 
 **What:** Package as a single `.exe` / binary so the system runs without Python installed.
 
@@ -175,7 +180,7 @@ pyinstaller --onefile --name basketball-predictor \
 
 ---
 
-### 5. Docker Container
+### 4. Docker Container
 
 **What:** Containerized deployment so the system runs identically anywhere.
 
@@ -201,7 +206,7 @@ docker run -p 5000:5000 \
 
 ---
 
-### 6. Production Hardening
+### 5. Production Hardening
 
 **What:** Make the Flask server suitable for anything beyond localhost demos.
 
@@ -223,7 +228,7 @@ These remain explicitly out of scope for the same reasons as the original roadma
 - ❌ Mobile app — separate project
 - ❌ User authentication — not needed for demo
 - ❌ GraphQL API — REST is sufficient
-- ❌ WebSockets — polling every 15s is adequate for scheduler status
+- ❌ WebSockets — polling every 15s is adequate for scheduler status; roster progress polling every 1s is adequate for fetch feedback
 - ❌ Microservices — overkill for single-file architecture
 - ❌ Database migrations — Snowflake schema auto-created from config
 
@@ -233,7 +238,7 @@ These remain explicitly out of scope for the same reasons as the original roadma
 
 1. **Config over code** — if it might change, it belongs in `config.yaml`
 2. **Improve only** — new models replace current only if they're actually better
-3. **Fail gracefully** — missing XGBoost, disabled Snowflake, blank ESPN response all handled cleanly
+3. **Fail gracefully** — missing XGBoost, disabled Snowflake, blank ESPN response, 404 roster endpoints all handled cleanly
 4. **Document the why** — code comments explain decisions, not just what the code does
 
 ---
