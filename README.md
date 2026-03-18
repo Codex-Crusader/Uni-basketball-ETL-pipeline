@@ -1,4 +1,4 @@
-# 🏀 NCAA Basketball Outcome Predictor
+# NCAA Basketball Outcome Predictor
 
 > *An end-to-end machine learning pipeline demonstrating production-ready ML engineering practices*
 
@@ -22,7 +22,7 @@
 
 ---
 
-## 📋 Overview
+## Overview
 
 This project implements a complete machine learning system for predicting NCAA basketball game outcomes (Home Win vs Away Win). The focus is on **ML engineering best practices** — building a maintainable, self-improving system rather than just training a model once and calling it done.
 
@@ -41,7 +41,7 @@ This project implements a complete machine learning system for predicting NCAA b
 
 ---
 
-## 🎯 Problem Statement
+## Problem Statement
 
 NCAA programs need quick, data-driven predictions to support decision-making. This system provides:
 
@@ -56,7 +56,7 @@ NCAA programs need quick, data-driven predictions to support decision-making. Th
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -115,7 +115,7 @@ NCAA programs need quick, data-driven predictions to support decision-making. Th
 
 ---
 
-## 🧠 Machine Learning Models
+## Machine Learning Models
 
 The system trains and compares **five models** every run, with an optional sixth:
 
@@ -134,7 +134,7 @@ All models are wrapped in a `StandardScaler → estimator` Pipeline so scaling i
 
 ---
 
-## 📊 Features Used for Prediction
+## Features Used for Prediction
 
 Each game is represented by **14 statistical features** pulled directly from ESPN box scores:
 
@@ -152,7 +152,7 @@ Each game is represented by **14 statistical features** pulled directly from ESP
 
 ---
 
-## 🚀 Installation & Setup
+## Installation & Setup
 
 ### Prerequisites
 
@@ -249,7 +249,7 @@ Snowflake credentials are read from environment variables (`SNOWFLAKE_USER`, `SN
 
 ---
 
-## 🔄 Auto-Learning Pipeline
+## Auto-Learning Pipeline
 
 When `--serve` is running, a background daemon thread manages continuous improvement:
 
@@ -272,7 +272,7 @@ Every decision (promoted / skipped + reason) is written to `data/learning_log.js
 
 ---
 
-## 🏃 Roster System
+## Roster System
 
 The roster system allows predictions to be built from individual player selections rather than historical team averages. It uses a separate ESPN endpoint to fetch player rosters and per-player season stats.
 
@@ -291,7 +291,7 @@ Running `--fetch-rosters` before serving will populate the cache for all teams c
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 basketball-predictor/
@@ -317,26 +317,26 @@ basketball-predictor/
 
 ---
 
-## 🌐 Dashboard Tabs
+## Dashboard Tabs
 
-### 🔮 Predict
+### Predict
 - Home team (Duke) fixed from config
 - **Stats mode:** Pick any opponent from a dropdown — stats auto-fill from their season averages
 - **Roster mode:** Select individual players for each team; stats are aggregated live and fed to the model
 - Confidence % shown with result; computed team stats displayed so you can see exactly what the model used
 
-### 📊 Overview
+### Overview
 - Total games, home/away win rates
 - Outcome distribution donut chart
 - Active model radar chart
 - **Model AUC Over Time** — visual progression across all registered versions
 
-### ⚡ Model Comparison
+### Model Comparison
 - All models side-by-side metrics table with inline bar charts
 - Grouped bar chart (Accuracy / F1 / ROC-AUC)
 - Multi-model radar chart
 
-### 🔬 Feature Analysis
+### Feature Analysis
 - Average stats for home-win vs away-win games
 - Per-model feature importance horizontal bar chart (model selector dropdown)
 
@@ -345,7 +345,7 @@ basketball-predictor/
 - One-click **Activate** to promote any version
 - Training size and timestamp per version
 
-### 🤖 Auto-Learn
+### Auto-Learn
 - Scheduler status (idle / fetching / training) — live polled every 15s
 - Countdown to next fetch and retrain
 - Full learning log table (promoted / skipped per run)
@@ -353,7 +353,7 @@ basketball-predictor/
 
 ---
 
-## 🔌 API Endpoints
+## API Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -393,7 +393,7 @@ Response includes `computed_stats` showing the exact aggregated features passed 
 
 ---
 
-## 📊 Model Evaluation Metrics
+## Model Evaluation Metrics
 
 | Metric | Definition |
 |--------|------------|
@@ -406,7 +406,7 @@ Response includes `computed_stats` showing the exact aggregated features passed 
 
 ---
 
-## ✅ Project Requirements Met
+## Project Requirements Met
 
 | Requirement | Status |
 |-------------|--------|
@@ -428,7 +428,7 @@ Response includes `computed_stats` showing the exact aggregated features passed 
 
 ---
 
-## 🚫 Known Limitations
+## Known Limitations
 
 1. **ESPN unofficial API** — no SLA, could change or go down without notice
 2. **`home_ppg` = game score** — since ESPN gives us actual scores rather than season PPG averages, the PPG feature is technically the score from that specific game, not a rolling average
@@ -453,7 +453,7 @@ Response includes `computed_stats` showing the exact aggregated features passed 
 
 ---
 
-## 🎯 Design Philosophy
+## Design Philosophy
 
 ### Engineering Over Accuracy
 This project prioritizes **system engineering** over raw model performance. The goal is to demonstrate:
@@ -467,14 +467,14 @@ This project prioritizes **system engineering** over raw model performance. The 
 
 ---
 
-## 📄 License
+## License
 
 MIT License.
 This project is submitted as part of academic coursework. It serves as a demonstration of ML engineering best practices and may be used as a learning reference.
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 **Technologies:**
 - scikit-learn for accessible ML algorithms
@@ -489,7 +489,7 @@ This project is submitted as part of academic coursework. It serves as a demonst
 
 ---
 
-## 💡 Key Takeaways
+## Key Takeaways
 
 If you learn one thing from this project, let it be this:
 
