@@ -44,7 +44,7 @@ from app.logger    import get_logger
 log = get_logger(__name__)
 
 
-# SYNTHETIC FALLBACK
+# ── SYNTHETIC FALLBACK ────────────────────────────────────────────────────────
 # you fools, you thought depriving me of my API access would stop me?
 # You have activated my trap card.
 # I summon from my deck: THE SYNTHETIC DATA GENERATOR!
@@ -104,7 +104,7 @@ def _generate_synthetic(num_games: int = 5000):
     return enriched  # very linear data — but at least it's honest now
 
 
-# CLI 
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Basketball Predictor v2.5")
@@ -130,7 +130,7 @@ def main():
     args = parser.parse_args()
     # I love you
 
-    # list-models
+    # ── list-models ──────────────────────────────────────────────────────────
     if args.list_models:
         reg = load_registry()
         if not reg["versions"]:
@@ -146,13 +146,13 @@ def main():
                   f"{v['trained_at'][:19]}{active}")
         return
 
-    # activate
+    # ── activate ─────────────────────────────────────────────────────────────
     if args.activate:
         ok = set_active_version(args.activate)
         print(f"Active → {args.activate}" if ok else f"Version {args.activate} not found.")
         return
 
-    # enrich
+    # ── enrich ───────────────────────────────────────────────────────────────
     if args.enrich:
         # Back-fill pre-game rolling averages into an existing games.json.
         # Makes your existing games training-ready without re-fetching.
@@ -173,10 +173,9 @@ def main():
         log.info("[Enrich] Done. %d/%d games now have pre-game features.",
                  new_enriched, len(enriched))
         log.info("[Enrich] Now run: python main.py --train")
-        return # lot of shenanigans regarding data, one version was not compatible with the new one
-               # this is simply here to update the json
+        return
 
-    # fetch
+    # ── fetch ────────────────────────────────────────────────────────────────
     if args.fetch:
         games = fetch_ncaa_data(max_games=args.max_games)
         if games:
@@ -186,7 +185,7 @@ def main():
                 append_to_json(games)
         return
 
-    # fetch-rosters
+    # ── fetch-rosters ────────────────────────────────────────────────────────
     if args.fetch_rosters:
         data = load_from_json()
         if not data:
@@ -207,7 +206,7 @@ def main():
         log.info("[Roster] Done. Success: %d  Failed: %d", ok, fail)
         return
 
-    # generate-synthetic
+    # ── generate-synthetic ───────────────────────────────────────────────────
     if args.generate_synthetic:
         data = _generate_synthetic(5000)
         if args.storage == "snowflake":
@@ -216,17 +215,30 @@ def main():
             save_to_json(data)
         return
 
-    # train
+    # ── train ────────────────────────────────────────────────────────────────
     if args.train:
         train_and_evaluate(args.storage, triggered_by="manual")
         return
 
-    # serve
+    # ── serve ────────────────────────────────────────────────────────────────
     if args.serve:
+
+        # Render (and other cloud platforms) wipe the disk on every cold start.
+        # If no data exists, bootstrap with synthetic data and train immediately
+        # so the dashboard is never served with a missing model.
+        # On local runs the files will already be there and this is skipped.
+        from pathlib import Path
+        if not Path("data/games.json").exists():
+            log.info("[Startup] No data found — generating synthetic data for cold start...")
+            data = _generate_synthetic(2000)
+            save_to_json(data)
+            log.info("[Startup] Synthetic data ready. Training initial model...")
+            train_and_evaluate(args.storage, triggered_by="startup")
+            log.info("[Startup] Bootstrap complete.")
+
         seasons = API_CFG.get("seasons", [API_CFG.get("season", 2024)])
         log.info("=" * 70)
         log.info("  %s  v%s", APP_CFG["name"], APP_CFG["version"])
-        log.info("  Dashboard  → http://localhost:%d", APP_CFG["port"])
         log.info("  Home team  : %s", HT_CFG["name"])
         log.info("  Auto-learn : %s", "ON" if AL_CFG.get("enabled") else "OFF")
         log.info("  Seasons    : %s  (cap: %d games)", seasons, API_CFG.get("max_games", 3000))
@@ -235,10 +247,14 @@ def main():
         log.info("=" * 70)
         scheduler.storage = args.storage
         scheduler.start()
+
+        # PORT: Render injects the PORT env var. Falls back to config for local use.
+        import os
+        port = int(os.environ.get("PORT", APP_CFG.get("port", 5000)))
         app.run(
-            debug        = APP_CFG.get("debug",  False),
-            port         = APP_CFG.get("port",   5000),
-            host         = APP_CFG.get("host",   "0.0.0.0"),
+            debug        = False,       # never debug mode in production
+            port         = port,
+            host         = "0.0.0.0",
             use_reloader = False,
         )
         return # at your service milord
@@ -253,5 +269,6 @@ if __name__ == "__main__":
 # main.py is now ~200 lines. used to be 2000.
 # each module has one job. no circular imports. no print() anywhere.
 # logging goes to data/app.log (10MB rotating) AND console simultaneously.
+# your prof should be impressed. or at least not unimpressed.
 
 # coffee log 26 -> 27
