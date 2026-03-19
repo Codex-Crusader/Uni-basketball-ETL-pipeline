@@ -1,11 +1,11 @@
 app:
   name: "Basketball Game Outcome Predictor"
-  version: "2.2.0"
+  version: "2.5.1"             # v2.5.1 — fair hyperparameters, best model wins on merit
   debug: true
   port: 5000
   host: "0.0.0.0"
 
-# HOME TEAM — the team this instance "roots for"
+# HOME TEAM - the team this instance "roots for"
 # All predictions are framed as: home_team vs <chosen opponent>
 # Stats are auto-filled from their season averages in the dataset
 home_team:
@@ -16,13 +16,13 @@ home_team:
 
 # AUTO-LEARNING SCHEDULER
 # Runs in the background when --serve is active.
-# Fetches new games → retrains → promotes only if model improves.
+# Fetches new games -> retrains -> promotes only if model improves.
 auto_learn:
   enabled: true
-  fetch_interval_hours: 6        # How often to check for new games
-  retrain_interval_hours: 24     # How often to force a full retrain (even without new data)
-  min_new_games_to_retrain: 15   # Minimum new games required to trigger a retrain
-  promote_threshold: 0.002       # New model must beat current by this much (ROC-AUC) to be promoted
+  fetch_interval_hours: 6
+  retrain_interval_hours: 24
+  min_new_games_to_retrain: 15
+  promote_threshold: 0.002
   learning_log_file: "data/learning_log.json"
 
 
@@ -34,10 +34,10 @@ data:
   random_state: 42
   min_games_required: 50
 
-  # Feature columns used for training (order matters)
+  # v2.5: feature fields store PRE-GAME ROLLING AVERAGES, not in-game stats.
+  # Run --enrich to back-fill existing data, then retrain.
+  # Do NOT add score-derived fields (ppg, eff_score) back here — that's leakage.
   features:
-    - home_ppg
-    - away_ppg
     - home_fg_pct
     - away_fg_pct
     - home_rebounds
@@ -50,18 +50,32 @@ data:
     - away_steals
     - home_blocks
     - away_blocks
+    - home_ast_to_tov
+    - away_ast_to_tov
 
-  # Label column
   label: "outcome"
 
-# NCAA API — ESPN (no key required, unofficial)
-# Switch provider to "custom" and fill custom block for your own API
+  # How many prior games to average for pre-game features.
+  pregame_window: 10
 
+  # Minimum prior games a team must have before their game is included in training.
+  pregame_min_games: 1
+
+  # Leakage detection threshold
+  leakage_correlation_threshold: 0.70
+
+# NCAA API - ESPN (no key required, unofficial)
 ncaa_api:
-  provider: "espn"           # espn | custom
-  season: 2024               # Academic year start (2024 = 2024-25 season)
-  max_games: 500             # Cap on games fetched per run
-  rate_limit_delay: 0.4      # Seconds between requests (be polite)
+  provider: "espn"
+  season: 2024               # Legacy fallback if seasons list absent
+
+  seasons:
+    - 2022
+    - 2023
+    - 2024
+
+  max_games: 3000
+  rate_limit_delay: 0.4
 
   espn:
     base_url: "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball"
@@ -71,13 +85,11 @@ ncaa_api:
     teams_path: "/teams"
     athletes_path: "/athletes"
 
-  # Fill this block when using your own API
   custom:
-    base_url: ""             # e.g. https://api.mystatsprovider.com/v1
-    api_key: ""              # or set env var NCAA_API_KEY
+    base_url: ""
+    api_key: ""
     games_endpoint: "/games"
     season_param: "season"
-    # Field mapping: our_field -> their_field
     field_map:
       game_id: "id"
       home_team: "home_team"
@@ -87,26 +99,24 @@ ncaa_api:
 
 
 # SNOWFLAKE  (keep disabled until credentials are available)
-# Set env vars SNOWFLAKE_USER / SNOWFLAKE_PASSWORD for safety
 snowflake:
   enabled: false
-  user: ""                   # or env SNOWFLAKE_USER
-  password: ""               # or env SNOWFLAKE_PASSWORD
+  user: ""
+  password: ""
   account: ""
   warehouse: ""
   database: ""
   schema: ""
   table: "BASKETBALL_GAMES"
 
-# ROSTER — ESPN player roster fetching and caching
+# ROSTER - ESPN player roster fetching and caching
 roster:
   cache_dir: "data/rosters"
   team_id_cache: "data/team_ids.json"
-  cache_ttl_hours: 24        # Re-fetch roster after this many hours
-  min_players_to_show: 5     # Minimum players needed to show roster panel
+  cache_ttl_hours: 24
+  min_players_to_show: 5
 
-
-# ROLLING STATS — last-N-games averages
+# ROLLING STATS - last-N-games averages (dashboard window selector)
 rolling:
   default_window: 12
   available_windows: [5, 10, 15, 20]
@@ -115,61 +125,74 @@ rolling:
 models:
   dir: "models"
   registry_file: "models/registry.json"
-  selection_metric: "roc_auc"  # accuracy | f1 | precision | recall | roc_auc
-  keep_top_n: 10               # Max versions kept in registry before pruning
+  selection_metric: "roc_auc"
+  keep_top_n: 10
 
-  # Toggle which models participate in each training run
   enabled:
     - gradient_boosting
     - random_forest
     - extra_trees
     - svm
     - mlp
-    - xgboost            # Skipped gracefully if xgboost not installed
+    - xgboost
 
-  # Per-model hyperparameters
+  # v2.5.1: FAIR HYPERPARAMETERS — each model gets a proper chance.
+  #
+  # v2.4 over-regularized everything defensively (min_samples_leaf=4,
+  # min_samples_split=10, MLP shrunk to [64,32]). With 2900 games and
+  # 14 features that was too tight and handicapped models unevenly.
+  #
+  # Note: max_depth for tree models is also subject to _adaptive_depth()
+  # in main.py which caps depth based on dataset size. At ~2300 training
+  # samples with 14 features the ceiling is depth=4 regardless of what's
+  # set here — so RF and Extra Trees effectively run at depth 4.
+  # GBM and XGBoost are already at 4 so they're unaffected.
+
   gradient_boosting:
-    n_estimators: 200
+    n_estimators: 300          # v2.5.1: raised from 200 — more trees = better ensemble
     learning_rate: 0.05
-    max_depth: 4
+    max_depth: 4               # adaptive ceiling is also 4 — this is the real limit
     subsample: 0.8
-    min_samples_split: 5
+    min_samples_split: 5       # v2.5.1: restored from 10 — was too aggressive
+    min_samples_leaf: 2        # v2.5.1: added explicitly at reasonable value
     random_state: 42
 
   random_forest:
-    n_estimators: 200
-    max_depth: 12
-    min_samples_split: 5
-    min_samples_leaf: 2
+    n_estimators: 300          # v2.5.1: raised from 200
+    max_depth: 10              # adaptive scaler caps this at 4 for current data size
+    min_samples_split: 5       # v2.5.1: restored from 10
+    min_samples_leaf: 2        # v2.5.1: restored from 4 — 4 was too restrictive
     random_state: 42
 
   extra_trees:
-    n_estimators: 200
-    max_depth: 12
-    min_samples_split: 5
+    n_estimators: 300          # v2.5.1: raised from 200
+    max_depth: 10              # adaptive scaler caps this at 4 for current data size
+    min_samples_split: 5       # v2.5.1: restored from 10
+    min_samples_leaf: 2        # v2.5.1: restored from 4
     random_state: 42
 
   svm:
     kernel: "rbf"
-    C: 1.0
+    C: 2.0                     # v2.5.1: raised from 1.0 — allows tighter fit on clean data
     gamma: "scale"
     probability: true
     random_state: 42
 
   mlp:
-    hidden_layer_sizes: [128, 64, 32]
-    activation: "relu"
+    hidden_layer_sizes: [128, 64, 32]  # v2.5.1: RESTORED from [64,32] — was unfairly shrunk
+    activation: "relu"                  # MLP at [64,32] was handicapped vs the others
     max_iter: 500
     early_stopping: true
-    validation_fraction: 0.1
+    validation_fraction: 0.15
     random_state: 42
 
   xgboost:
-    n_estimators: 200
+    n_estimators: 300          # v2.5.1: raised from 200
     learning_rate: 0.05
-    max_depth: 4
+    max_depth: 5               # v2.5.1: raised from 4, adaptive will cap at 4 anyway
     subsample: 0.8
     colsample_bytree: 0.8
+    min_child_weight: 3        # v2.5.1: added — XGBoost's equivalent of min_samples_leaf
     use_label_encoder: false
     eval_metric: "logloss"
     random_state: 42
