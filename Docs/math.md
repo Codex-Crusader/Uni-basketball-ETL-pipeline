@@ -81,7 +81,7 @@ Where $W$ is the configured window size (default 10). Only the most recent $W$ g
 
 For `ast_to_tov`, the rolling average is not computed by averaging the per-game ratio. Instead:
 
-$$\text{ast\_to\_tov} = \frac{\bar{x}_{t,\text{assists}}}{\bar{x}_{t,\text{turnovers}}}$$
+$$\text{ast-to-tov} = \frac{\bar{x}_{t,\text{assists}}}{\bar{x}_{t,\text{turnovers}}}$$
 
 This is the ratio of the rolling averages, not the rolling average of the ratios. The former is more numerically stable — a single game with very few turnovers inflates the per-game ratio, but has limited effect on the average count.
 
@@ -416,16 +416,16 @@ Tree model `max_depth` is capped at runtime to prevent overfitting on smaller da
 
 **Rule of thumb:** each leaf needs approximately $10 \times p$ samples to split reliably, where $p$ is the number of features. At depth $D$ there are up to $2^D$ leaves. Solving for the maximum safe depth:
 
-$$\text{max\_safe} = \left\lfloor \log_2\left(\frac{n}{10 \cdot p}\right) \right\rfloor$$
+$$\text{max-safe} = \left\lfloor \log_2\left(\frac{n}{10 \cdot p}\right) \right\rfloor$$
 
 Clamped to a minimum of 3:
 
-$$\text{depth} = \max\left(3,\ \min\left(\text{base\_depth},\ \text{max\_safe}\right)\right)$$
+$$\text{depth} = \max\left(3,\ \min\left(\text{base-depth},\ \text{max-safe}\right)\right)$$
 
 At the current dataset size:
 - $n = 2300$ (training set, 80% of 2900 enriched games)
 - $p = 14$ features
-- $\text{max\_safe} = \lfloor \log_2(2300 / 140) \rfloor = \lfloor \log_2(16.4) \rfloor = 4$
+- $\text{max-safe} = \lfloor \log_2(2300 / 140) \rfloor = \lfloor \log_2(16.4) \rfloor = 4$
 
 So regardless of whether the config specifies `max_depth: 4` (Gradient Boosting, XGBoost) or `max_depth: 10` (Random Forest, Extra Trees), all tree models run at depth 4 at the current dataset size. As more data is collected, the ceiling rises automatically:
 
