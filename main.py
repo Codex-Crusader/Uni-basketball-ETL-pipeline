@@ -23,6 +23,8 @@ v2.5 recommended workflow for existing data:
 """
 
 import argparse
+from pathlib import Path
+import threading
 
 # Setup logging FIRST — before any app module is imported so every
 # module's get_logger() call attaches to the already-configured handler.
@@ -227,14 +229,15 @@ def main():
         # If no data exists, bootstrap with synthetic data and train immediately
         # so the dashboard is never served with a missing model.
         # On local runs the files will already be there and this is skipped.
-        from pathlib import Path
-        if not Path("data/games.json").exists():
+    if not Path("data/games.json").exists():
+        def _bootstrap():
             log.info("[Startup] No data found — generating synthetic data for cold start...")
             data = _generate_synthetic(2000)
             save_to_json(data)
             log.info("[Startup] Synthetic data ready. Training initial model...")
             train_and_evaluate(args.storage, triggered_by="startup")
             log.info("[Startup] Bootstrap complete.")
+        threading.Thread(target=_bootstrap, daemon=True).start()
 
         seasons = API_CFG.get("seasons", [API_CFG.get("season", 2024)])
         log.info("=" * 70)
