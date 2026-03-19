@@ -1,6 +1,6 @@
-# 🔄 Code Flow Documentation
+# Code Flow Documentation
 
-> *Complete architecture and data flow documentation for the NCAA basketball predictor system*
+Complete architecture and data flow documentation for the NCAA basketball predictor system, v2.5.
 
 ---
 
@@ -19,215 +19,250 @@
 
 ---
 
-## 🏛️ System Overview
+## System Overview
 
-The basketball predictor is built as a **config-driven, self-improving ML pipeline** with seven operational modes and a background auto-learn scheduler.
+The basketball predictor is built as a config-driven, self-improving ML pipeline with a modular package structure, a background auto-learn scheduler, and a pre-game data enrichment step that eliminates the leakage present in earlier versions.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     main.py (~1000 lines)                    │
-│              Config-Driven Single Script Architecture        │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-              config.yaml (all settings)
-                     │
-          Command Line Arguments Parser
-                     │
-    ┌────────┬────────┼────────┬────────┬────────┬────────┐
-    │        │        │        │        │        │        │
-    ▼        ▼        ▼        ▼        ▼        ▼        ▼
-[--fetch] [--fetch [--gen  [--train] [--serve] [--list [--activate
-         -rosters] synth]                      models]   VERSION]
+basketball_ver3/
+    main.py              CLI entry point only (~200 lines)
+    config.yaml          All settings
+    dashboard.html       Single-page frontend
+    app/                 All business logic
+        config.py        Config loading and path constants
+        logger.py        Logging setup (rotating file + console)
+        storage.py       JSON and Snowflake I/O
+        enrichment.py    Pre-game rolling average pipeline
+        fetcher.py       ESPN multi-season game fetcher
+        roster.py        ESPN roster fetcher and player aggregation
+        preprocessing.py Validation, feature prep, team stats
+        models.py        Registry, build, train, evaluate
+        scheduler.py     AutoLearnScheduler background thread
+        api.py           Flask application and all routes
 ```
 
-### Design Philosophy
+### Design Principles
 
-**Config-Driven Architecture:** All settings live in `config.yaml`. No value is hardcoded in Python — feature lists, model hyperparameters, thresholds, team name, intervals, file paths, and API endpoints are all read from config at startup.
+**Config-Driven Architecture:** All settings live in `config.yaml`. No value is hardcoded in Python. Feature lists, model hyperparameters, thresholds, team name, intervals, file paths, and API endpoints are all read from config at startup via `app/config.py`.
 
-**Single Script + Background Thread:** All logic resides in `main.py`. When `--serve` is used, a daemon `AutoLearnScheduler` thread runs alongside Flask, continuously fetching data and retraining without user intervention.
+**Modular with no circular imports:** Dependencies flow in one direction only (see dependency chain in README). Each module has exactly one responsibility.
 
-**Promote-Only Model Updates:** A new model only replaces the active model if its ROC-AUC exceeds the current model by at least `promote_threshold` (default 0.002). The model can only improve, never regress.
+**Pre-game features only:** As of v2.5, the feature vector contains rolling averages of prior games, not in-game statistics. The enrichment pipeline runs between fetch and training. Models trained on in-game stats are inadmissible — they describe outcomes rather than predicting them.
+
+**Promote-only model updates:** A new model only replaces the active model if its ROC-AUC exceeds the current model by at least `promote_threshold` (default 0.002). The model can only improve over time.
+
+**Structured logging:** Every module uses `logging.getLogger("bball.<module>")`. Log output goes to both console (INFO+) and `data/app.log` (DEBUG+, rotating at 10 MB, 2 backups).
 
 ---
 
-## 📊 Architecture Components
+## Architecture Components
 
-### Layer 0: Config Loading
+### Layer 0: Config Loading (`app/config.py`)
 
-**Function:** `load_config(path)` — runs at module import time
+Runs at module import time. All other modules import constants from here — nobody reads `config.yaml` directly.
 
 ```python
 CFG         = load_config()
 APP_CFG     = CFG["app"]
-HT_CFG      = CFG["home_team"]       # Duke Blue Devils, court, ESPN ID
-DATA_CFG    = CFG["data"]            # features list, paths, split sizes
-API_CFG     = CFG["ncaa_api"]        # ESPN endpoints, season, rate limit
+HT_CFG      = CFG["home_team"]
+DATA_CFG    = CFG["data"]            # features list, paths, split sizes, pregame window
+API_CFG     = CFG["ncaa_api"]        # ESPN endpoints, seasons list, rate limit
 SF_CFG      = CFG["snowflake"]       # credentials via env vars
-MODEL_CFG   = CFG["models"]          # enabled models + hyperparams
+MODEL_CFG   = CFG["models"]          # enabled models and hyperparams
 AL_CFG      = CFG["auto_learn"]      # intervals, thresholds
-ROSTER_CFG  = CFG.get("roster", {})  # cache dir, TTL, team_id cache path
-ROLLING_CFG = CFG.get("rolling", {}) # available windows, default window
+ROSTER_CFG  = CFG.get("roster", {})
+ROLLING_CFG = CFG.get("rolling", {})
 ```
 
-Every subsequent function reads from these module-level dicts. Changing any setting requires only a `config.yaml` edit.
+Directories (`DATA_DIR`, `MODELS_DIR`, `ROSTER_DIR`) are created at import time. Any module that writes files can assume they exist.
 
 ---
 
-### Layer 1: Command Line Interface
+### Layer 1: Logging (`app/logger.py`)
 
-**Function:** `main()`
+Must be initialised before any other module is imported. `main.py` calls `setup_logging()` as its very first action.
 
-**Commands:**
-
-```bash
---fetch                # Fetch real NCAA games from ESPN API
---fetch-rosters        # Pre-fetch and cache rosters for all teams in dataset
---generate-synthetic   # Generate synthetic fallback data (500 games)
---train                # Train all models, register best by ROC-AUC
---serve                # Start Flask + auto-learn scheduler
---list-models          # Print version table to console
---activate VERSION     # Set active model (e.g. --activate v3)
---storage local|snowflake  # Storage backend (default: local)
+```python
+# main.py
+from app.logger import setup_logging
+setup_logging()
+# now import everything else
 ```
+
+Child loggers are obtained by name in each module:
+
+```python
+from app.logger import get_logger
+log = get_logger(__name__)
+# produces logger named bball.app.fetcher, bball.app.models, etc.
+```
+
+The `_configured` guard makes `setup_logging()` idempotent — safe to call multiple times.
 
 ---
 
-### Layer 2: Data Ingestion
+### Layer 2: Data Ingestion (`app/fetcher.py`)
 
 #### ESPN Game Data (`ESPNFetcher`)
 
-Real NCAA data, no API key required.
+Real NCAA data, no API key required. v2.5 adds multi-season support and `game_date` extraction.
 
 ```
-get_game_ids(start, end)
-  │
-  └─ Iterates day-by-day from Nov 1 to Apr 30 of configured season
-     └─ GET /scoreboard?dates=YYYYMMDD → list of event IDs
+get_game_ids(start_date, end_date)
+    Iterates day-by-day over the date range
+    GET /scoreboard?dates=YYYYMMDD
+    Returns list of (event_id, game_date) tuples
+    game_date extracted from event["date"] ISO string
 
-get_box_score(event_id)
-  │
-  ├─ GET /summary?event=ID
-  ├─ Parses boxscore.teams → home_d, away_d
-  ├─ Extracts stats dict: {fieldGoalPct, totalRebounds, assists, ...}
-  ├─ Reads header.competitions[0].competitors for scores
-  └─ Returns game dict with 14 features + outcome + metadata
+get_box_score(event_id, game_date)
+    GET /summary?event=ID
+    Parse boxscore.teams for home/away stats
+    Parse header.competitions[0].competitors for scores
+    Normalize FG% strings ("45.5" -> 0.455)
+    Returns game dict with 14 raw features, game_date, and pregame_enriched=False
 ```
 
-**Rate limiting:** `time.sleep(delay)` between every request (configurable in `config.yaml`).
+The returned record stores in-game statistics at this stage. The enrichment step replaces the feature fields with rolling averages before the record is used for training.
 
-**Field normalization:** FG% from ESPN arrives as `"45.5"` (percent string). `norm_pct()` divides by 100 if value > 1.
+**Multi-season fetch** (`fetch_ncaa_data`):
+
+```
+For each season in config seasons list [2022, 2023, 2024]:
+    If running total >= max_games: stop
+    Fetch all game IDs for the season (Nov 1 to Apr 30)
+    For each ID, fetch box score
+    Deduplicate across seasons by game_id
+
+After all seasons:
+    Call enrich_with_pregame_averages() on the full batch
+    Return only enriched records
+```
 
 #### Custom API (`CustomAPIFetcher`)
 
-Stub for user-provided APIs. Set `provider: custom` in `config.yaml`, fill `base_url` and `field_map`. No code changes needed.
-
-#### Synthetic Fallback (`_generate_synthetic`)
-
-Used when ESPN is unavailable. Generates realistic game records using uniform distributions and a weighted strength formula with home court advantage (+3). Outcome has 15% noise to avoid perfect separability.
+Stub for user-provided APIs. Set `provider: custom` in config, fill `base_url` and `field_map`. No code changes needed.
 
 ---
 
-### Layer 3: Storage Abstraction
+### Layer 3: Pre-Game Enrichment (`app/enrichment.py`)
 
-**Local (default):**
+This is the core change in v2.5. It converts raw in-game box scores into genuinely predictive pre-game features.
 
+```
+enrich_with_pregame_averages(games, window=10, min_games=1)
+
+    1. Separate already-enriched records (pass through unchanged)
+    2. Sort remaining records chronologically by game_date
+       (falls back to ESPN ID numeric ordering for records without game_date)
+
+    3. For each game in chronological order:
+
+        Look up team_history[home_team] and team_history[away_team]
+
+        If either team has fewer than min_games of history:
+            Record this game in their history (for future games)
+            Skip this game — excluded from output (cold-start)
+
+        Else:
+            Save original in-game stats under home_game_* / away_game_*
+            Replace home_fg_pct, home_rebounds, etc. with rolling averages
+            Recompute ast_to_tov from rolling avg assists / rolling avg turnovers
+            Set pregame_enriched = True
+            Set pregame_window_used = min(home_hist_len, away_hist_len, window)
+            Add to output
+
+        Add this game to team history AFTER processing
+        (a game must never be its own pre-game feature)
+
+    Return already_enriched + newly enriched records
+```
+
+The result: `home_fg_pct = 0.47` means "what this team averaged over their last 10 games going into tonight" — knowable before tipoff. Before the fix, it meant "what they shot in this game" — which is the outcome, not a predictor.
+
+Original in-game stats (`home_game_fg_pct`, `away_game_fg_pct`, etc.) remain in the record for analytics display only. They are never in the training feature vector.
+
+---
+
+### Layer 4: Storage (`app/storage.py`)
+
+Common interface for both backends. The rest of the codebase calls `load_data(storage)` and never knows which backend is active.
+
+**Local JSON:**
 ```python
 save_to_json(data)      # full overwrite
 load_from_json()        # full read
-append_to_json(data)    # load → deduplicate by game_id → save
+append_to_json(data)    # load + deduplicate by game_id + save
+load_data("local")      # routes to load_from_json
 ```
 
-Deduplication prevents the same ESPN game from being counted twice across fetch runs.
-
-**Snowflake (optional):**
-
+**Snowflake:**
 ```python
 _sf_conn()              # reads credentials from env vars
-_sf_create_table(conn)  # CREATE TABLE IF NOT EXISTS
-save_to_snowflake(data) # DELETE + bulk INSERT
-append_to_snowflake(data) # INSERT only
+save_to_snowflake(data) # DELETE + INSERT
+append_to_snowflake(data)
+load_data("snowflake")  # routes to load_from_snowflake
 ```
 
-Snowflake is disabled by default (`enabled: false` in config). Enable by setting `enabled: true` and providing `SNOWFLAKE_USER` / `SNOWFLAKE_PASSWORD` environment variables.
-
-**Common interface:** `load_data(storage)` routes to either backend transparently. Training code never knows which backend is active.
+`_sanitize(obj)` recursively replaces `float('nan')` and `float('inf')` with `None`. Required because XGBoost cross-validation occasionally produces NaN scores, and Python's `json.dumps` writes NaN literally — invalid JSON that crashes the browser.
 
 ---
 
-### Layer 4: Team Stats Engine
+### Layer 5: Team Stats Engine (`app/preprocessing.py`)
 
-**Function:** `build_team_stats(data, window=None)`
+`build_team_stats(data, window=None)` powers the predict form's auto-fill.
 
-This is what powers the predict form's auto-fill. For every game in the dataset, each team's stats are accumulated regardless of whether they were home or away.
+For every game in the dataset, each team's pre-game feature values are accumulated regardless of whether they were home or away that game. Mirroring logic: when a team was away, their `away_*` values are stored under `home_*` keys so every team ends up with consistent `home_*` feature names.
 
-**Rolling window support:** If `window` is set, only the most recent N games per team are used (sorted by `fetched_at` descending). `None` means full season average. The `/teams` and `/team_stats/<name>` endpoints accept a `?window=N` query param that is passed directly through to this function.
+With rolling window: only the most recent N games per team are used (sorted by `game_date` descending).
 
-```
-For each game:
-  Home team → accumulate home_* columns under their home_* feature keys
-  Home team → accumulate away_* columns (mirrored) under their home_* keys
-  Away team → same logic, mirrored
-
-Per team:
-  Sort games newest-first → slice to window (or keep all)
-  Average all accumulated values → season/window average per feature
-  Count games_played (total, not windowed), games_in_window, wins
-```
-
-This means Duke's `home_ppg` stat represents their average points scored per game — not just when they were the home side. The feature names remain `home_*` / `away_*` because that's what the model was trained on; they represent "the team filling the home slot" vs "the team filling the away slot" in a prediction.
-
-**`get_home_team_stats(data, window=None)`:** Fuzzy-matches the configured home team name and returns their stats dict. Used by the `/home_team` endpoint to pre-fill the prediction form.
+Since v2.5, the values being averaged are already pre-game rolling averages (from enrichment). Averaging them again across games produces a stable season-form estimate.
 
 ---
 
-### Layer 5: Model Training
+### Layer 6: Model Training (`app/models.py`)
 
-**Function:** `train_and_evaluate(storage, triggered_by)`
-
-**Models built by `build_models()`:**
-
-All wrapped in `StandardScaler → estimator` Pipeline. This means scaling is part of the model object itself — no separate scaler needs to be saved or loaded.
-
-| Key in config | Class | Notes |
-|---------------|-------|-------|
-| `gradient_boosting` | `GradientBoostingClassifier` | Sequential trees |
-| `random_forest` | `RandomForestClassifier` | Parallel ensemble |
-| `extra_trees` | `ExtraTreesClassifier` | Randomized splits |
-| `svm` | `SVC(probability=True)` | RBF kernel |
-| `mlp` | `MLPClassifier` | 128→64→32, early stopping |
-| `xgboost` | `XGBClassifier` | Optional — graceful `ImportError` skip |
-
-**Training sequence:**
+`train_and_evaluate(storage, triggered_by)` runs the full pipeline:
 
 ```
 1. load_data(storage)
-2. prepare_data(data) → X, y, feature_names
-3. train_test_split(stratify=y, test_size=0.2)
-4. For each model:
-   a. model.fit(X_train, y_train)
-   b. compute_metrics(model, X_test, y_test)
-      → accuracy, precision, recall, f1, roc_auc, confusion_matrix
-   c. get_feature_importances(model, feature_names)
-      → reads clf.feature_importances_ or abs(clf.coef_)
-   d. cross_val_score(model, X, y, cv=5, scoring="roc_auc")
-      → cv_roc_auc_mean, cv_roc_auc_std
-5. best = max by config selection_metric (default: roc_auc)
-6. Promote gate (if triggered_by != "manual"):
-   if new_auc < current_auc + promote_threshold → skip, log, return None
-7. register_model(best)
-8. Save comparison_vN.json + latest_comparison.json
-9. _append_log(result)
+2. prepare_data(data)
+       Filter: only records with pregame_enriched=True
+       (falls back to all records with a warning if none are enriched)
+       X shape: (n_enriched, 14)
+       y shape: (n_enriched,)
+3. _validate_training_data(X, y, feature_names)
+       Leakage check: correlation > 0.70 with outcome -> WARNING
+       Zero-variance check
+       Class balance check: home win rate outside 40-70% -> WARNING
+       Sample-to-feature ratio check: < 20x -> WARNING
+4. train_test_split(stratify=y, test_size=0.2)
+5. build_models(n_samples, n_features)
+       Adaptive depth: cap tree depth at log2(n/10p)
+       All wrapped in StandardScaler -> estimator Pipeline
+6. For each model:
+       fit on train set
+       compute_metrics on test set
+       get_feature_importances
+       cross_val_score (5-fold, scoring="roc_auc")
+7. best = max by selection_metric (default: roc_auc)
+8. AUC sanity check:
+       > 0.80: warn (are records enriched?)
+       < 0.52: warn (barely above chance)
+       0.52-0.80: expected honest prediction range
+9. Promote gate (triggered_by != "manual"):
+       if new_auc < current_auc + promote_threshold: log "skipped", return None
+10. register_model(best) -> versioned .pkl
+11. Save comparison JSON
+12. _append_log(result)
 ```
 
-**`stratify=y`** in the train-test split ensures the home win ratio is preserved in both sets — important because real NCAA data has ~73% home win rate.
+`stratify=y` ensures the ~69% home win rate is preserved in both train and test sets.
 
 ---
 
-### Layer 6: Model Registry
+### Layer 7: Model Registry (`app/models.py`)
 
-**Functions:** `register_model`, `load_active_model`, `set_active_version`
-
-**Registry file:** `models/registry.json`
+Registry file: `models/registry.json`
 
 ```json
 {
@@ -235,583 +270,384 @@ All wrapped in `StandardScaler → estimator` Pipeline. This means scaling is pa
   "versions": [
     {
       "version": "v1",
-      "model_name": "Extra Trees",
-      "filename": "extra_trees_v1_a3f2c1d4.pkl",
-      "metrics": { "roc_auc": 0.9766, "f1": 0.9474, ... },
-      "feature_names": ["home_ppg", "away_ppg", ...],
-      "training_size": 400,
-      "trained_at": "2025-03-15T14:22:11",
+      "model_name": "Gradient Boosting",
+      "filename": "gradient_boosting_v1_a3f2c1d4.pkl",
+      "metrics": { "roc_auc": 0.7441, "f1": 0.8161, ... },
+      "feature_names": ["home_fg_pct", "away_fg_pct", ...],
+      "training_size": 2328,
+      "trained_at": "2026-03-19T14:22:11",
       "hash": "a3f2c1d4"
-    },
-    ...
+    }
   ]
 }
 ```
 
-**Version numbering:** Sequential integer, prefixed `v`. Each version gets a short MD5 hash of the serialized model object for integrity.
+Each `.pkl` stores `{"model": pipeline_obj, "feature_names": list}`. Feature names are stored with the model to prevent silent mismatches if the feature list changes between versions.
 
-**`.pkl` format:** Each file contains `{"model": pipeline_obj, "feature_names": list}`. Storing feature names with the model prevents silent mismatches if the feature list changes between versions.
-
-**Pruning:** When `len(versions) > keep_top_n` (default 10), oldest `.pkl` files are deleted from disk and their entries removed from the registry.
-
-**Rollback:** `set_active_version("v2")` simply updates `active_version` in the registry. The next `/predict` call loads that version's `.pkl`.
+Pruning: when `len(versions) > keep_top_n`, oldest `.pkl` files are deleted from disk.
 
 ---
 
-### Layer 7: Learning Log
+### Layer 8: Flask Application (`app/api.py`)
 
-**File:** `data/learning_log.json`
+The Flask `app` object and `_scheduler` instance live here and are imported by `main.py`. The dashboard is served from the project root:
 
-Every training run appends one entry — whether promoted or skipped:
+```python
+from pathlib import Path
 
-```json
-{
-  "timestamp": "2025-03-15T20:00:01",
-  "triggered_by": "new_data",
-  "result": "promoted",
-  "version": "v3",
-  "model_name": "Gradient Boosting",
-  "roc_auc": 0.9891,
-  "f1": 0.96,
-  "dataset_size": 500
-}
+@app.route("/")
+def serve_dashboard():
+    return send_file(Path(__file__).parent.parent / "dashboard.html")
 ```
 
-```json
-{
-  "triggered_by": "scheduler",
-  "result": "skipped",
-  "reason": "New AUC 0.9812 vs current 0.9891 (threshold +0.002). Skipping.",
-  "new_auc": 0.9812,
-  "current_auc": 0.9891
-}
-```
-
-This log is what the Dashboard's **Auto-Learn tab** reads.
+This resolves correctly regardless of working directory because it is relative to `__file__` (the `api.py` file), not to `os.getcwd()`.
 
 ---
 
-## 🚀 Command Execution Flows
+## Command Execution Flows
 
-### Flow 1: `python main.py --fetch`
+### `python main.py --fetch`
 
 ```
 main()
-  │
-  └─ fetch_ncaa_data(max_games=500)
-      │
-      ├─ ESPNFetcher.get_game_ids("20241101", "20250430")
-      │   └─ ~180 days × 25 games/day = thousands of IDs
-      │
-      └─ For each game_id (up to max_games):
-          │
-          ├─ ESPNFetcher.get_box_score(gid)
-          │   ├─ GET /summary?event=ID
-          │   ├─ Parse box_teams → home_d, away_d
-          │   ├─ Extract stats (FG%, rebounds, assists, turnovers, steals, blocks)
-          │   ├─ Normalize pct fields
-          │   ├─ Read scores → determine outcome
-          │   └─ Return game dict (14 features + metadata)
-          │
-          └─ append_to_json(games)
-              ├─ load_from_json() → existing games
-              ├─ Filter: keep only game_ids not already stored
-              └─ save_to_json(existing + new_unique)
+    fetch_ncaa_data(max_games=3000)
+        ESPNFetcher.get_game_ids(start, end)  [per season]
+            Returns (game_id, game_date) tuples
+        For each (gid, game_date):
+            ESPNFetcher.get_box_score(gid, game_date)
+                Store game_date on record
+                pregame_enriched = False
+        enrich_with_pregame_averages(all_games, window=10)
+            Sort by game_date
+            Build rolling history per team
+            Replace feature fields with rolling averages
+            Set pregame_enriched = True
+        Return enriched games
+    append_to_json(games)
+        Deduplicate by game_id
+        save_to_json(existing + new_unique)
 ```
 
----
+### `python main.py --enrich`
 
-### Flow 2: `python main.py --fetch-rosters`
+Applies the enrichment pipeline to an existing `games.json` that was fetched before v2.5 (when game records stored in-game stats). This avoids a full re-fetch.
 
 ```
 main()
-  │
-  ├─ load_from_json() → existing game records
-  │
-  ├─ Collect unique team names from home_team + away_team fields
-  │   └─ discard empty strings
-  │
-  └─ RosterFetcher.fetch_team(name) for each team  ← blocking, not async
-      │
-      ├─ get_team_id(team_name)
-      │   ├─ Load data/team_ids.json cache
-      │   ├─ Exact match → return ID
-      │   ├─ Case-insensitive fuzzy match → return ID
-      │   ├─ Cache miss → GET /teams?limit=1000
-      │   │   └─ Parse sports[0].leagues[0].teams → build full cache
-      │   └─ Save updated cache → try exact + fuzzy again
-      │
-      ├─ _cache_valid(team_id)
-      │   └─ Check data/rosters/<team_id>.json exists + fetched_at < 24h ago
-      │
-      ├─ get_roster(team_id)
-      │   ├─ GET /teams/{id}/roster
-      │   ├─ For each athlete: extract id, name, position, jersey
-      │   └─ _parse_embedded_stats(athlete)
-      │       ├─ Read athlete.statistics[] and athlete.displayStats[]
-      │       └─ Extract ppg, rpg, apg, spg, bpg, tov, fg_pct, fgm, fga
-      │
-      ├─ For players where ppg == 0 (no embedded stats):
-      │   └─ get_player_stats(player_id)
-      │       ├─ GET /athletes/{id}/statistics
-      │       ├─ Find "avg"/"pergame" category in splits
-      │       └─ Extract same stat fields (graceful 404 handling)
-      │
-      └─ Save result → data/rosters/<team_id>.json
-          { team_name, team_id, players: [...], fetched_at }
+    load_from_json()
+    enrich_with_pregame_averages(data, window=10)
+        Already-enriched records pass through unchanged
+        New records: sort by ESPN ID (sequential = chronological proxy)
+        Build rolling history, replace feature fields
+    save_to_json(enriched)
 ```
 
----
+After `--enrich`, run `--train`. The existing `games.json` is usable; no re-fetch is needed.
 
-### Flow 3: `python main.py --train`
+### `python main.py --train`
 
 ```
 main()
-  │
-  └─ train_and_evaluate("local", triggered_by="manual")
-      │
-      ├─ load_from_json() → 500 game dicts
-      │
-      ├─ prepare_data(data)
-      │   ├─ Filter: only records with all 14 features present
-      │   ├─ X = np.array([[g[feat] for feat in cfg_features] for g in valid])
-      │   │   shape: (500, 14)
-      │   └─ y = np.array([g["outcome"] for g in valid])
-      │       shape: (500,)   ~73% ones (home wins)
-      │
-      ├─ train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
-      │   X_train: (400, 14),  X_test: (100, 14)
-      │
-      ├─ build_models() → 5 (or 6) Pipeline objects
-      │
-      ├─ For each model:
-      │   ├─ Pipeline.fit(X_train, y_train)
-      │   │   (StandardScaler fits on X_train, transforms, then clf.fit)
-      │   ├─ compute_metrics(model, X_test, y_test)
-      │   ├─ get_feature_importances(model, feature_names)
-      │   └─ cross_val_score(model, X, y, cv=5, scoring="roc_auc")
-      │
-      ├─ best = max by roc_auc
-      │
-      ├─ register_model(best_name, best_pipeline, metrics, features, 400)
-      │   ├─ Increment version number
-      │   ├─ Hash model bytes (MD5)
-      │   ├─ model_path.write_bytes(pickle.dumps({model, feature_names}))
-      │   ├─ Append entry to registry.json
-      │   └─ Prune old versions if > keep_top_n
-      │
-      ├─ _sanitize(snap) → json.dump → comparison_vN.json + latest_comparison.json
-      │   (_sanitize replaces NaN/Inf with None for valid JSON)
-      │
-      └─ _append_log(promoted entry)
+    train_and_evaluate("local", triggered_by="manual")
+        load_from_json()
+        prepare_data(data)
+            Filter to pregame_enriched=True records (~2800 of 2900)
+            X: (2800, 14)  y: (2800,)
+        _validate_training_data(X, y, features)
+        train_test_split (stratify, 80/20)
+        build_models(n_samples=2240, n_features=14)
+            _adaptive_depth: base_depth=4 -> ceiling=4 at this dataset size
+        For each of 5 models:
+            fit, metrics, importances, 5-fold CV
+        Best: Gradient Boosting AUC 0.7441
+        register_model -> v1 .pkl
+        Write latest_comparison.json
+        _append_log(promoted)
 ```
 
----
-
-### Flow 4: `python main.py --serve`
+### `python main.py --serve`
 
 ```
 main()
-  │
-  ├─ _scheduler.start()
-  │   └─ daemon thread: AutoLearnScheduler._loop()
-  │       └─ time.sleep(60)  # wait for Flask to start
-  │           └─ [see Auto-Learning Pipeline section]
-  │
-  └─ app.run(debug=False, port=5000, use_reloader=False)
-      │        ↑
-      │   use_reloader=False prevents the scheduler from
-      │   starting twice in Flask's debug reload process
-      │
-      └─ Serving at http://localhost:5000
+    setup_logging()        [already called at top of main.py]
+    _scheduler.start()
+        daemon thread: AutoLearnScheduler._loop()
+            sleep(60) [let Flask start first]
+            [see Auto-Learning Pipeline]
+    app.run(debug=False, port=5000, use_reloader=False)
 ```
+
+`use_reloader=False` prevents the scheduler from starting twice during Flask's debug reload cycle.
 
 ---
 
-## 🤖 Auto-Learning Pipeline
+## Auto-Learning Pipeline
 
-**Class:** `AutoLearnScheduler` — runs as a daemon thread.
+`AutoLearnScheduler` runs as a daemon thread. It manages two independent intervals:
 
 ```
 _loop():
-  sleep(60)  ← let Flask initialize
+    sleep(60)
 
-  while not stopped:
-    now = time.time()
+    while not stopped:
+        now = time.time()
 
-    if now - last_fetch >= fetch_interval (6h):
-      status = "fetching"
-      new_games = fetch_ncaa_data()
-      added = append_to_json(new_games)
-      last_fetch = now
+        if now - last_fetch >= fetch_interval (6h):
+            status = "fetching"
+            new_games = fetch_ncaa_data()
+                [includes enrichment — new records arrive pre-enriched]
+            added = append_to_json(new_games)
+            last_fetch = now
 
-      if added >= min_new_games (15):
-        status = "training"
-        train_and_evaluate(triggered_by="new_data")
-        last_retrain = now
+            if added >= min_new_games (15):
+                status = "training"
+                train_and_evaluate(triggered_by="new_data")
+                    [promote gate active — must beat current AUC + 0.002]
+                last_retrain = now
 
-    elif now - last_retrain >= retrain_interval (24h):
-      status = "training"
-      train_and_evaluate(triggered_by="scheduler")
-      last_retrain = now
+        elif now - last_retrain >= retrain_interval (24h):
+            status = "training"
+            train_and_evaluate(triggered_by="scheduler")
+            last_retrain = now
 
-    status = "idle"
-    sleep in 60s chunks (checking stop event each time)
+        status = "idle"
+        sleep in 60-second chunks (checking stop event each time)
 ```
 
-**Promote gate inside `train_and_evaluate` when `triggered_by != "manual"`:**
+The promote gate:
 
 ```
-new_auc = best_model.metrics["roc_auc"]
-current_auc = active_entry.metrics["roc_auc"]
+new_auc = candidate_model.metrics["roc_auc"]
+current_auc = active_model.metrics["roc_auc"]
 
 if new_auc >= current_auc + promote_threshold:
-    register_model() → new active version
-    log: { result: "promoted" }
+    register_model()  -> new active version
+    log: result="promoted"
 else:
-    log: { result: "skipped", reason: "..." }
-    return None  ← no version change
+    log: result="skipped", reason="...", new_auc=..., current_auc=...
+    return None  (no version change)
 ```
 
-This means the active model is immutable unless something genuinely better emerges.
+The active model's AUC is monotonically non-decreasing over time. The model can only improve or stay the same.
 
 ---
 
-## 🔄 Data Flow
+## Data Flow
 
-### End-to-End Stats-Mode Prediction Flow
+### End-to-End Stats-Mode Prediction
 
 ```
 User opens http://localhost:5000
-  │
-  └─ Flask: send_file("dashboard.html")
-      │
-      └─ Browser executes JS init():
-          │
-          ├─ fetch("/features")         → feature list + rolling window options
-          ├─ fetch("/home_team")        → Duke stats from season averages
-          ├─ fetch("/teams")            → all teams dropdown
-          ├─ fetch("/model_info")       → active version + metrics
-          ├─ fetch("/analytics")        → stats + comparison + feature importances
-          ├─ fetch("/registry")         → all versions for Registry tab
-          ├─ fetch("/autolearn/status") → scheduler state
-          └─ fetch("/learning_log")     → training history
+    Flask: send_file(Path(__file__).parent.parent / "dashboard.html")
+        [resolves to project root regardless of working directory]
 
-User selects away team from dropdown
-  │
-  └─ onAwayTeamChange()
-      └─ fetch("/team_stats/Kansas Jayhawks?window=12")
-          └─ build_team_stats(data, window=12) → last 12 games only
-              └─ Auto-fill away stat fields (green border)
+Browser JS init():
+    fetch("/features")          feature list + rolling window options
+    fetch("/home_team")         Duke stats from season averages
+    fetch("/teams")             all teams for opponent dropdown
+    fetch("/model_info")        active version and metrics
+    fetch("/analytics")         stats + comparison + feature importances
+    fetch("/registry")          all versions for Registry tab
+    fetch("/autolearn/status")  scheduler state
+    fetch("/learning_log")      training history
 
-User clicks "Predict"
-  │
-  └─ POST /predict  { home_ppg: 84.3, away_ppg: 72.1, ... }
-      │
-      ├─ load_active_model()
-      │   └─ registry.json → active_version → load .pkl
-      │       └─ payload = { model: Pipeline, feature_names: [...] }
-      │
-      ├─ X = np.array([[payload[f] for f in feature_names]])
-      │
-      ├─ pred = model.predict(X)[0]
-      │   (Pipeline: StandardScaler.transform → clf.predict)
-      │
-      ├─ conf = max(model.predict_proba(X)[0])
-      │
-      └─ return { prediction, confidence, model_name, version }
+User selects away team
+    onAwayTeamChange()
+        fetch("/team_stats/Kansas Jayhawks?window=12")
+            build_team_stats(data, window=12)
+                [uses pre-game rolling averages stored in game records]
+            Auto-fill away stat fields
+
+User clicks Predict
+    POST /predict { home_fg_pct: 0.472, away_fg_pct: 0.461, ... }
+        load_active_model()
+            registry.json -> active_version -> load .pkl
+            payload = {model: Pipeline, feature_names: [...]}
+        X = np.array([[payload[f] for f in feature_names]])
+        pred = model.predict(X)[0]
+            [Pipeline: StandardScaler.transform -> clf.predict]
+        conf = max(model.predict_proba(X)[0])
+        return {prediction, confidence, model_name, version}
 ```
 
-### End-to-End Roster-Mode Prediction Flow
+### End-to-End Roster-Mode Prediction
 
 ```
-User switches to Roster mode in dashboard
-  │
-  └─ fetch("/roster/Duke Blue Devils")
-      │
-      ├─ RosterFetcher.fetch_team_async("Duke Blue Devils")
-      │   ├─ If cached and valid → write _roster_progress["Duke Blue Devils"]
-      │   │   { status: "ready", players: [...], done: N, total: N }
-      │   │   return (no thread needed)
-      │   │
-      │   └─ Else → set _roster_progress = { status: "loading", ... }
-      │       └─ threading.Thread(target=_run, daemon=True).start()
-      │           └─ fetch_team(team_name) [see --fetch-rosters flow]
-      │               └─ writes incremental progress to _roster_progress
-      │                  after each player stat fetch
-      │
-      └─ Return current _roster_progress state immediately
+User switches to Roster mode
+    fetch("/roster/Duke Blue Devils")
+        RosterFetcher.fetch_team_async("Duke Blue Devils")
+            If cached and valid:
+                Write _roster_progress["Duke Blue Devils"] = {status: "ready", ...}
+                Return (no thread needed)
+            Else:
+                Set _roster_progress = {status: "loading", ...}
+                Start background thread: fetch_team(team_name)
+                    get_team_id -> ESPN team lookup or cache
+                    get_roster -> /teams/{id}/roster
+                        _parse_embedded_stats per athlete
+                    For players missing stats:
+                        get_player_stats(player_id) -> /athletes/{id}/statistics
+                        Graceful 404 handling
+                    Save to data/rosters/<team_id>.json
+                    Write final progress: {status: "ready", players: [...]}
+        Return current _roster_progress state immediately
 
 Dashboard polls GET /roster/progress/Duke Blue Devils every 1 second
-  │
-  └─ return _roster_progress.get(team_name)
-      { status: "loading"|"ready"|"error", players: [...], done: N, total: M }
-      └─ Browser renders player cards as they appear, shows progress bar
+    Return _roster_progress.get(team_name)
+    Browser renders player cards as they arrive, shows progress bar
 
-User selects players and clicks "Predict (Roster)"
-  │
-  └─ POST /predict/from_roster
-      {
-        "home_players": [ {ppg, rpg, apg, spg, bpg, tov, fg_pct, fgm, fga}, ... ],
-        "away_players": [ {...}, ... ]
-      }
-      │
-      ├─ compute_stats_from_roster(home_players, "home")
-      │   ├─ Sum ppg, rpg, apg, spg, bpg, tov across all players
-      │   ├─ FGA-weighted average for fg_pct
-      │   │   (total_fgm / total_fga; falls back to simple avg if fga = 0)
-      │   └─ Returns { home_ppg, home_fg_pct, home_rebounds, ... }
-      │
-      ├─ compute_stats_from_roster(away_players, "away") → { away_* }
-      │
-      ├─ combined = { **home_stats, **away_stats }
-      │
-      ├─ X = np.array([[combined.get(f, 0) for f in feature_names]])
-      │   (missing features filled with 0 rather than crashing)
-      │
-      ├─ pred, conf — same pipeline as stats mode
-      │
-      └─ return { prediction, confidence, computed_stats, home_count, away_count, ... }
-          └─ computed_stats shown in dashboard so user sees what numbers were used
-```
-
----
-
-## 💾 Storage Architecture
-
-### Local JSON
-
-**File:** `data/games.json`
-
-**Record structure:**
-```json
-{
-  "game_id": "ESPN_401703521",
-  "home_team": "Duke Blue Devils",
-  "away_team": "Kansas Jayhawks",
-  "home_score": 84,
-  "away_score": 72,
-  "home_ppg": 84.0,
-  "away_ppg": 72.0,
-  "home_fg_pct": 0.4921,
-  "away_fg_pct": 0.3854,
-  "home_rebounds": 39.0,
-  "away_rebounds": 31.0,
-  "home_assists": 17.0,
-  "away_assists": 11.0,
-  "home_turnovers": 11.0,
-  "away_turnovers": 14.0,
-  "home_steals": 8.0,
-  "away_steals": 6.0,
-  "home_blocks": 5.0,
-  "away_blocks": 3.0,
-  "outcome": 1,
-  "source": "espn",
-  "fetched_at": "2025-03-15T14:00:00"
-}
-```
-
-**Deduplication:** `append_to_json` builds a set of existing `game_id` values and filters new data against it before writing. Same game can never appear twice regardless of how many times `--fetch` is run.
-
-### Roster Cache
-
-**Directory:** `data/rosters/<team_id>.json`
-
-**Record structure:**
-```json
-{
-  "team_name": "Duke Blue Devils",
-  "team_id": "150",
-  "players": [
+User selects players and clicks Predict (Roster mode)
+    POST /predict/from_roster
     {
-      "id": "4432783",
-      "name": "Kyle Filipowski",
-      "position": "C",
-      "jersey": "30",
-      "ppg": 16.4,
-      "rpg": 8.1,
-      "apg": 2.3,
-      "spg": 0.8,
-      "bpg": 1.4,
-      "tov": 2.2,
-      "fg_pct": 0.517,
-      "fgm": 5.9,
-      "fga": 11.4
+        "home_players": [{ppg, rpg, apg, spg, bpg, tov, fg_pct, fgm, fga}, ...],
+        "away_players": [{...}, ...]
     }
-  ],
-  "fetched_at": "2025-03-15T14:00:00"
-}
+        compute_stats_from_roster(home_players, "home")
+            Sum ppg, rpg, apg, spg, bpg, tov
+            FGA-weighted fg_pct (total_fgm / total_fga)
+            Derive ast_to_tov from summed totals
+            Separate model features from insight_ features
+        compute_stats_from_roster(away_players, "away")
+        X = np.array([[combined.get(f, 0) for f in feature_names]])
+        pred, conf [same Pipeline as stats mode]
+        return {prediction, confidence, computed_stats, insights,
+                home_count, away_count, model_name, version}
 ```
-
-**TTL:** 24 hours by default (`roster.cache_ttl_hours` in config). `_cache_valid()` compares `fetched_at` to now.
-
-**Team ID cache:** `data/team_ids.json` maps display name → ESPN team ID. Built on first lookup and reused on all subsequent calls. Fuzzy matching (`team_name.lower() in k.lower()`) handles minor name variations.
-
-### Snowflake (Optional)
-
-Schema auto-created from `DATA_CFG["features"]` list — adding a feature to config automatically adds it to the CREATE TABLE statement. Credentials read exclusively from environment variables.
 
 ---
 
-## 🎯 Model Training Pipeline Detail
+## Storage Architecture
+
+### Local JSON (`data/games.json`)
+
+Record structure (v2.5):
+
+```json
+{
+  "game_id":         "ESPN_401703521",
+  "game_date":       "2024-01-15",
+  "home_team":       "Duke Blue Devils",
+  "away_team":       "Kansas Jayhawks",
+  "home_score":      84,
+  "away_score":      72,
+  "home_ppg":        84.0,
+  "away_ppg":        72.0,
+  "home_fg_pct":     0.4670,
+  "away_fg_pct":     0.4480,
+  "home_rebounds":   36.4,
+  "away_rebounds":   32.1,
+  "home_assists":    15.8,
+  "away_assists":    13.2,
+  "home_turnovers":  11.9,
+  "away_turnovers":  13.7,
+  "home_steals":     7.1,
+  "away_steals":     6.4,
+  "home_blocks":     4.2,
+  "away_blocks":     3.1,
+  "home_ast_to_tov": 1.328,
+  "away_ast_to_tov": 0.964,
+  "home_game_fg_pct":     0.5210,
+  "away_game_fg_pct":     0.3854,
+  "home_eff_score":  35.77,
+  "away_eff_score":  27.75,
+  "outcome":         1,
+  "source":          "espn",
+  "fetched_at":      "2026-03-19T14:00:00",
+  "pregame_enriched": true,
+  "pregame_window_used": 10
+}
+```
+
+The feature fields (`home_fg_pct`, `home_rebounds`, etc.) contain **pre-game rolling averages**. The original in-game stats are preserved under `home_game_*` keys for analytics. `home_ppg` / `away_ppg` and `home_eff_score` / `away_eff_score` are stored but are not in the training feature vector.
+
+### Roster Cache (`data/rosters/<team_id>.json`)
+
+```json
+{
+  "team_name":  "Duke Blue Devils",
+  "team_id":    "150",
+  "players":    [ { "id": "...", "name": "...", "ppg": 16.4, ... } ],
+  "fetched_at": "2026-03-19T14:00:00"
+}
+```
+
+TTL: 24 hours. `_cache_valid()` compares `fetched_at` to now.
+
+---
+
+## Model Training Pipeline Detail
 
 ### Why ROC-AUC as Selection Metric
 
-ROC-AUC measures the model's ability to rank home wins above away wins across all decision thresholds — it's threshold-independent. With ~73% home win rate in real NCAA data, accuracy alone would reward a model that just predicts "Home Win" every time. ROC-AUC penalizes this. Configurable to `f1`, `accuracy`, etc. in `config.yaml`.
+With ~69% home wins across three seasons, a model that predicts "Home Win" for every game achieves 69% accuracy but AUC = 0.5. ROC-AUC measures whether the model's probability estimates correctly rank home wins above away wins — it penalises models that achieve accuracy purely through class imbalance. It is threshold-independent and the correct metric here.
 
-### Why Stratified Split
+### Why Pre-Game Features Matter
 
-The real ESPN data has ~73% home wins. Without `stratify=y`, a random 20% test set might have 80% or 65% home wins by chance — making evaluation unstable. Stratification guarantees the test set mirrors the full dataset's class distribution.
+The v2.4 validation showed home_fg_pct correlating +0.81 with outcome. That is nearly as high as using the score itself. In-game shooting percentage is not a pre-game predictor — it is a consequence of winning. The fix shifts every feature to the rolling average from prior games, where correlations with outcome drop to 0.10-0.25, which is the range of genuine predictive signal.
 
-### Why Pipeline (Scaler + Estimator)
+### Why Adaptive Depth
 
-SVM and MLP are sensitive to feature scale — `home_ppg` (range 60-95) and `home_fg_pct` (range 0.38-0.55) are on completely different scales. Wrapping in a Pipeline means the scaler is trained only on `X_train`, then applied to `X_test` — no data leakage. The entire Pipeline is pickled as one object, so loading a model version automatically gets the correct scaler.
+At n=2300 training samples and p=14 features, `log2(2300 / (10 x 14)) = 4.04`. Setting tree depth to 10 in config is overridden to 4 at runtime. This prevents trees from memorising the training set. As more data is collected, the ceiling rises automatically — no config change needed.
 
-### NaN Sanitization
+### Why Pipeline
 
-XGBoost's cross-validation occasionally returns `NaN` when it cannot compute a CV score (e.g. label imbalance in a fold). Python's `json.dumps` writes `NaN` literally — which is invalid JSON spec and causes `JSON.parse` to throw in the browser. `_sanitize(obj)` recursively replaces any `float('nan')` or `float('inf')` with `None` before serialization.
-
----
-
-## 🏃 Roster System
-
-**Class:** `RosterFetcher`
-
-**ESPN endpoints used:**
-
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /teams?limit=1000` | All teams — builds team name → ID cache |
-| `GET /teams/{id}/roster` | Player list with embedded stats |
-| `GET /athletes/{id}/statistics` | Per-player season averages (fallback only) |
-
-**Stat extraction priority:**
-
-```
-1. athlete.statistics[] + athlete.displayStats[]  ← embedded in roster response
-   (preferred — avoids separate API calls)
-
-2. GET /athletes/{id}/statistics                  ← only for players with ppg == 0
-   (fallback — ESPN returns 404 for many players; caught gracefully)
-
-3. _empty_player_stats()                          ← all zeros / fg_pct = 0.45 default
-   (last resort — player still appears in list, just with no stats)
-```
-
-**Async pattern:**
-
-`fetch_team_async(team_name)` starts a background thread and returns immediately. The thread writes incremental progress to the module-level `_roster_progress` dict as each player is processed:
-
-```python
-_roster_progress: dict = {}   # module-level, shared between Flask threads
-
-# Progress states:
-{ "status": "loading", "players": [...so_far...], "done": 12, "total": 15 }
-{ "status": "ready",   "players": [...all...],    "done": 15, "total": 15 }
-{ "status": "error",   "players": [],             "done": 0,  "total": 0,
-  "message": "Could not fetch roster for 'Team X'." }
-```
-
-Player names appear in the dashboard immediately (from the roster endpoint before stat fetches begin), and stats fill in as the thread progresses. The dashboard polls `/roster/progress/<team>` every second until `status == "ready"`.
-
-**Aggregation (`compute_stats_from_roster`):**
-
-```
-team_ppg       = sum(player.ppg for each player)
-team_rebounds  = sum(player.rpg for each player)
-team_assists   = sum(player.apg for each player)
-team_steals    = sum(player.spg for each player)
-team_blocks    = sum(player.bpg for each player)
-team_turnovers = sum(player.tov for each player)
-
-team_fg_pct:
-  if sum(fga) > 0:  total_fgm / total_fga   ← FGA-weighted (more accurate)
-  else:             mean(player.fg_pct)       ← simple average fallback
-```
-
-Result dict uses `{side}_*` prefix (`home_*` or `away_*`) to match the model's expected feature names exactly.
+SVM and MLP are scale-sensitive. The Pipeline ensures `StandardScaler` is fit only on `X_train` and applied consistently to `X_test` and to inference inputs. The entire Pipeline is pickled as one object, so loading a model version automatically gets the correct scaler.
 
 ---
 
-## 🌐 API Reference
+## API Reference
 
 | Method | Endpoint | Returns |
 |--------|----------|---------|
-| GET | `/` | `dashboard.html` |
+| GET | `/` | `dashboard.html` from project root |
 | POST | `/predict` | prediction, confidence, version (stats mode) |
-| POST | `/predict/from_roster` | prediction, confidence, computed_stats, player counts |
-| GET | `/analytics` | games stats, model comparison, feature importances |
-| GET | `/model_info` | active model entry from registry |
+| POST | `/predict/from_roster` | prediction, confidence, computed_stats, insights, player counts |
+| GET | `/analytics` | game stats, model comparison, feature importances, enrichment rate |
+| GET | `/model_info` | active model registry entry |
 | GET | `/registry` | full registry JSON |
 | POST | `/registry/activate/<v>` | `{status: ok}` |
 | GET | `/features` | feature list + rolling window options from config |
 | GET | `/teams?window=N` | all teams with season or rolling averages |
-| GET | `/team_stats/<name>?window=N` | single team stats (fuzzy match), optional window |
-| GET | `/home_team?window=N` | configured home team + stats |
-| GET | `/roster/<team_name>` | kick off async roster fetch; returns immediate progress state |
-| GET | `/roster/progress/<team_name>` | poll fetch progress: status, players so far, done/total |
+| GET | `/team_stats/<n>?window=N` | single team stats (fuzzy match), optional window |
+| GET | `/home_team?window=N` | configured home team and stats |
+| GET | `/roster/<team_name>` | kick off async roster fetch; returns current progress state |
+| GET | `/roster/progress/<team_name>` | poll progress: status, players so far, done/total |
 | POST | `/roster/refresh/<team_name>` | force fresh ESPN fetch (bypass 24h cache) |
-| GET | `/autolearn/status` | scheduler state + countdowns |
+| GET | `/autolearn/status` | scheduler state and countdowns |
 | POST | `/autolearn/trigger` | starts background retrain |
 | GET | `/learning_log?n=50` | last N log entries |
-| GET | `/debug` | health check (paths, counts, active model, roster dirs) |
+| GET | `/debug` | health check: paths, game count, enrichment rate, active model |
 
 ---
 
-## 🎨 Dashboard Integration
+## Dashboard Integration
 
 ### Tab Rendering Strategy
 
-Charts are not drawn on page load — they are drawn fresh each time a tab becomes visible via `switchTab()`. This solves the Chart.js 0×0 canvas problem: hidden `display:none` tabs have no dimensions at render time.
-
-```
-switchTab(name)
-  │
-  ├─ Remove .active from all tabs and panes
-  ├─ Add .active to selected pane
-  │
-  └─ requestAnimationFrame(() => {
-        if name == "overview":
-            drawOutcomeChart()   // uses analyticsData
-            drawRadar()          // uses model_comparison
-            drawProgressChart()  // uses registryData
-        elif name == "comparison":
-            drawComparisonCharts()   // grouped bar + multi-radar
-            buildComparisonTable()   // metric bars table
-        elif name == "features":
-            drawFeatureChart()   // home_win vs away_win averages
-            buildFiSelector()    // dropdown + importance bar chart
-    })
-```
+Charts are not drawn on page load. They are drawn fresh each time a tab becomes visible via `switchTab()`. This solves the Chart.js 0x0 canvas problem: `display:none` tabs have no dimensions at render time.
 
 `requestAnimationFrame` defers execution by one paint cycle, ensuring the browser has applied `display:block` before Chart.js measures the canvas.
 
-### Data Separation
+`loadAnalytics()` fetches data and updates DOM stat cards immediately. It does not draw charts. This separation means a slow analytics fetch never blocks tab switching.
 
-`loadAnalytics()` fetches data and updates stat cards (plain DOM — always safe). It does **not** draw charts. Charts are drawn by `switchTab()` only when their canvas is visible and has real pixel dimensions. This separation means a slow analytics fetch never blocks tab switching.
-
----
-
-## 🔧 Key Design Decisions
+### Key Design Decisions
 
 | Decision | Rationale |
 |----------|-----------|
 | Config-driven via YAML | No secrets or tunables in Python source |
-| ROC-AUC for model selection | Robust to class imbalance (~73% home wins) |
+| Pre-game rolling averages as features | Eliminates leakage — model trains on knowable pre-game data |
+| game_date on every record | Correct chronological ordering for enrichment |
+| enrichment as a separate pipeline step | Can back-fill existing data without re-fetching |
+| ROC-AUC for model selection | Robust to class imbalance (~69% home wins) |
 | Stratified train-test split | Preserves class ratio in both sets |
 | Pipeline (Scaler + clf) | Scaler trained on train set only; no leakage |
-| Model versioning with hash | Detects model file corruption |
-| Promote threshold | Prevents model regression from noise |
-| `use_reloader=False` | Prevents scheduler starting twice in Flask debug |
-| `_sanitize()` before JSON | XGBoost CV can return NaN; invalid JSON crashes browser |
-| Lazy chart rendering | Chart.js cannot render into 0×0 hidden canvases |
-| game_id deduplication | Safe to run `--fetch` multiple times |
-| Roster embedded stats first | Avoids per-player `/statistics` calls; fewer 404s |
-| Async roster fetch + progress | Player names visible immediately; stats stream in |
-| Module-level `_roster_progress` | Shared state between Flask request thread and roster thread |
+| Adaptive tree depth | Prevents overfitting; scales automatically with dataset size |
+| `Path(__file__).parent.parent / "dashboard.html"` | Resolves correctly from `app/api.py` to project root |
+| `use_reloader=False` | Prevents scheduler starting twice in Flask debug mode |
+| `_sanitize()` before JSON | XGBoost CV can produce NaN; invalid JSON crashes browser |
+| Lazy chart rendering | Chart.js cannot render into 0x0 hidden canvases |
+| Module-level `_roster_progress` | Shared state between Flask and background roster threads |
 | FGA-weighted fg_pct aggregation | More accurate than simple average when players have unequal shot volume |
 | `window=None` default in `build_team_stats` | Full season average unless caller explicitly requests rolling |
-
----
-
-*This document provides a complete technical reference for understanding how the system operates at every level, from config loading to chart rendering.*
+| RotatingFileHandler 10 MB x 2 | Bounded disk usage; always have recent history |
+| setup_logging() called before all other imports | Ensures all module-level loggers attach to the configured handler |
