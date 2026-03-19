@@ -24,135 +24,165 @@
 
 ## Overview
 
-This project implements a complete machine learning system for predicting NCAA basketball game outcomes (Home Win vs Away Win). The focus is on **ML engineering best practices** — building a maintainable, self-improving system rather than just training a model once and calling it done.
+This project implements a complete machine learning system for predicting NCAA basketball game outcomes (Home Win vs Away Win). The focus is on ML engineering best practices: building a maintainable, self-improving system rather than just training a model once.
 
 ### What This Project Demonstrates
 
-- **Real NCAA data** via ESPN's unofficial API (no key required)
-- **Script-based ML workflow** (no Jupyter notebooks)
-- **SQL database storage** (Snowflake provisioned; local JSON for development)
-- **5-model automated comparison** (+ optional XGBoost as a 6th) with ROC-AUC selection and 5-fold cross-validation
-- **Model versioning registry** with rollback support
-- **Auto-learning scheduler** that fetches, retrains, and promotes improvements automatically
-- **Home-team-centric predictions** with season-average auto-fill
-- **Roster-based predictions** — select individual players and aggregate their stats into team features
-- **Interactive multi-tab dashboard** for predictions, analytics, model history, and roster management
-- **Config-driven architecture**, no hardcoded values anywhere
+- Real NCAA data via ESPN's unofficial API (no key required), across three seasons
+- Script-based ML workflow with no Jupyter notebooks
+- SQL database storage (Snowflake provisioned; local JSON for development)
+- 5-model automated comparison (plus optional XGBoost as a sixth) with ROC-AUC selection and 5-fold cross-validation
+- Pre-game rolling average enrichment eliminating data leakage from in-game stats
+- Model versioning registry with rollback support
+- Auto-learning scheduler that fetches, retrains, and promotes improvements automatically
+- Home-team-centric predictions with season-average auto-fill and rolling window selector
+- Roster-based predictions using individual player season averages
+- Interactive multi-tab dashboard for predictions, analytics, model history, and roster management
+- Config-driven modular architecture with structured logging
 
 ---
 
 ## Problem Statement
 
-NCAA programs need quick, data-driven predictions to support decision-making. This system provides:
+NCAA programs need quick, data-driven pre-game predictions to support decision-making. This system provides:
 
-1. A reproducible, automated training pipeline
+1. A reproducible, automated training pipeline trained on honest pre-game data
 2. Five-model comparison (six with XGBoost) with automatic best-model selection
-3. Easy-to-use prediction interface with team stats auto-filled
+3. An easy-to-use prediction interface with team stats auto-filled from historical averages
 4. Roster-mode predictions built from individual player season averages
 5. Continuous self-improvement as new game data arrives
 6. Full analytics dashboard including feature importance and model progression over time
 
-**Key Focus:** Engineering a system that improves itself over time, not just one that trains once.
+**Key Focus:** Engineering a system that improves itself over time on data it could realistically have had before each game — not post-game box scores.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Command Line Interface                    │
-│                         (main.py)                            │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-        ┌────────────┼────────────┬─────────────┐
-        │            │            │             │
-        ▼            ▼            ▼             ▼
-  [--fetch]  [--generate-  [--train]       [--serve]
-              synthetic]        │             │
-        │            │          │             │
-        ▼            ▼          │             ▼
-┌──────────────────────────┐   │    ┌─────────────────────┐
-│   Data Ingestion         │   │    │  Auto-Learn         │
-│   • ESPN API (real data) │───┘    │  Scheduler          │
-│   • Synthetic fallback   │        │  (background thread)│
-│   • De-duplication       │        │  fetch → retrain    │
-└────────────┬─────────────┘        │  → promote if AUC ↑ │
-             │                      └─────────────────────┘
-             ▼
-┌──────────────────────────┐
-│   Storage Layer          │
-│   • Local JSON (default) │
-│   • Snowflake (optional) │
-└────────────┬─────────────┘
-             │
-             ▼
-┌──────────────────────────┐
-│   Training Pipeline      │
-│   • 5 models (+ XGBoost) │
-│   • 5-fold CV each       │
-│   • Best by ROC-AUC      │
-│   • Version registered   │
-└────────────┬─────────────┘
-             │
-             ▼
-┌──────────────────────────┐
-│   Model Registry         │
-│   • Versioned .pkl files │
-│   • Activate/rollback    │
-│   • Promote threshold    │
-└────────────┬─────────────┘
-             │
-             ▼
-┌──────────────────────────┐     ┌──────────────────────────┐
-│   Flask Web Server       │     │   Roster System          │
-│   • Prediction API       │     │   • ESPN team ID lookup  │
-│   • Analytics API        │◄───►│   • Player roster fetch  │
-│   • Team stats API       │     │   • Per-player stat agg  │
-│   • Roster API           │     │   • Disk cache (24h TTL) │
-│   • Multi-tab Dashboard  │     │   • Async + progress poll│
-└──────────────────────────┘     └──────────────────────────┘
+Uni-basketball-ETL-pipeline/
+    ├──main.py               CLI entry point (~200 lines)
+    ├──config.yaml           All settings, no hardcoded values
+    ├──dashboard.html        Frontend: all tabs, charts, team picker
+    ├──requirements.txt
+    ├──data/
+    │    ├──games.json        ESPN game records with pre-game features
+    │    ├──app.log           Rotating log (10 MB x 2 backups = 30 MB ceiling)
+    │    ├──learning_log.json Auto-learn history
+    │    ├──team_ids.json     ESPN team name to ID cache
+    │    └──rosters/          Per-team roster cache
+    ├──models/
+    │    ├──registry.json     Version index and metrics
+    │    ├──latest_comparison.json
+    │    └──*.pkl             Versioned model files
+    └──app/
+         ├──__init__.py
+         ├──config.py         Config loading, all CFG constants, Path constants
+         ├──logger.py         RotatingFileHandler setup, get_logger()
+         ├──storage.py        JSON and Snowflake I/O, _sanitize()
+         ├──enrichment.py     Pre-game rolling average pipeline
+         ├──fetcher.py        ESPNFetcher, multi-season fetch
+         ├──roster.py         RosterFetcher, player stat aggregation
+         ├──preprocessing.py  Validation, adaptive depth, prepare_data, team stats
+         ├──models.py         Registry, build_models, train_and_evaluate
+         ├──scheduler.py      AutoLearnScheduler background thread
+         └──api.py            Flask app and all routes
 ```
+
+### Module Dependency Order
+
+No circular imports. Each module only imports from modules above it in this chain:
+
+```
+config.py
+    logger.py
+        storage.py
+            enrichment.py
+                fetcher.py
+                roster.py
+                preprocessing.py
+                    models.py
+                        scheduler.py
+                            api.py
+                                main.py
+```
+
+### Logging
+
+All `print()` calls have been replaced with the Python `logging` module.
+
+- Console: INFO and above — clean operational output
+- File (`data/app.log`): DEBUG and above — everything including verbose fetch progress
+- Rotation: 10 MB per file, 2 backups retained (30 MB ceiling total)
+- Format: `2024-01-15 19:00:01  INFO  bball.app.fetcher  [ESPN] Season 2022-23 done.`
+
+---
+
+## The Leakage Problem and the Fix
+
+### What Was Wrong (v2.4 and earlier)
+
+The original feature fields stored in-game box score statistics. When `home_fg_pct = 0.52` meant "what this team shot during the game," the model learned "teams that shot well won" — which is circular. The model was describing outcomes rather than predicting them. AUC of 0.9666 was not impressive; it was a red flag.
+
+### The Fix (v2.5)
+
+Every game record now stores **pre-game rolling averages** in the feature fields. When `home_fg_pct = 0.47`, it means "what this team averaged over their last 10 games going into tonight." That is knowable before tipoff. That is actual prediction.
+
+The original in-game stats are preserved under `home_game_*` / `away_game_*` keys for analytics display. They are simply no longer part of the training feature vector.
+
+The enrichment pipeline (`enrich_with_pregame_averages`) sorts all games chronologically by `game_date`, builds a rolling history per team, and for each game overwrites the feature fields with that team's prior-game averages. A game where either team has no prior history is excluded from training (cold-start exclusion).
+
+**AUC before fix: 0.9666 (leakage)**
+**AUC after fix: ~0.74 (honest pre-game prediction)**
+
+The AUC went down. That is the right result.
 
 ---
 
 ## Machine Learning Models
 
-The system trains and compares **five models** every run, with an optional sixth:
+The system trains and compares five models every run, with an optional sixth:
 
 | Model | Notes |
 |-------|-------|
-| **Gradient Boosting** | Sequential trees, strong on tabular data |
-| **Random Forest** | Parallel ensemble, reliable feature importances |
-| **Extra Trees** | Extra randomness reduces overfitting on smaller sets |
-| **SVM (RBF kernel)** | Strong margin classifier, needs StandardScaler |
-| **Neural Network (MLP)** | 128→64→32, ReLU, early stopping |
-| **XGBoost** *(optional)* | Install with `pip install xgboost` to enable as a 6th model |
+| Gradient Boosting | Sequential trees, strong on tabular data |
+| Random Forest | Parallel ensemble, reliable feature importances |
+| Extra Trees | Extra randomness reduces overfitting on smaller sets |
+| SVM (RBF kernel) | Strong margin classifier, needs StandardScaler |
+| Neural Network (MLP) | 128 to 64 to 32, ReLU, early stopping |
+| XGBoost (optional) | Install with `pip install xgboost` to enable |
 
-All models are wrapped in a `StandardScaler → estimator` Pipeline so scaling is handled correctly for every model automatically.
+All models are wrapped in a `StandardScaler -> estimator` Pipeline so scaling is handled correctly and consistently. The scaler is fit only on the training set — no leakage.
 
-**Model Selection:** Best **ROC-AUC** from 5-fold cross-validation. Configurable in `config.yaml`.
+**Model Selection:** Best ROC-AUC from 5-fold cross-validation. Configurable in `config.yaml`.
+
+**Adaptive depth:** Tree model `max_depth` is capped at `log2(n_samples / (10 * n_features))` to prevent overfitting on smaller datasets. At 2300 training samples with 14 features, the ceiling is depth 4 regardless of what is set in config.
 
 ---
 
 ## Features Used for Prediction
 
-Each game is represented by **14 statistical features** pulled directly from ESPN box scores:
+Each game is represented by **14 features**. As of v2.5, these are pre-game rolling averages, not in-game box scores.
 
 | Feature | Description |
 |---------|-------------|
-| `home_ppg` / `away_ppg` | Points scored that game |
-| `home_fg_pct` / `away_fg_pct` | Field goal percentage |
-| `home_rebounds` / `away_rebounds` | Total rebounds |
-| `home_assists` / `away_assists` | Assists |
-| `home_turnovers` / `away_turnovers` | Turnovers |
-| `home_steals` / `away_steals` | Steals |
-| `home_blocks` / `away_blocks` | Blocks |
+| `home_fg_pct` / `away_fg_pct` | Rolling average field goal percentage (last 10 games) |
+| `home_rebounds` / `away_rebounds` | Rolling average total rebounds |
+| `home_assists` / `away_assists` | Rolling average assists |
+| `home_turnovers` / `away_turnovers` | Rolling average turnovers |
+| `home_steals` / `away_steals` | Rolling average steals |
+| `home_blocks` / `away_blocks` | Rolling average blocks |
+| `home_ast_to_tov` / `away_ast_to_tov` | Derived: rolling avg assists / rolling avg turnovers |
 
-**Outcome:** Binary classification — `1` = Home Win, `0` = Away Win
+Fields that were removed from the feature vector (still stored in `games.json` for analytics):
+- `home_ppg` / `away_ppg` — actual game score, not a pre-game stat
+- `home_eff_score` / `away_eff_score` — derived from score, therefore also leakage
+
+**Outcome:** Binary — `1` = Home Win, `0` = Away Win
 
 ---
 
-## Installation & Setup
+## Installation and Setup
 
 ### Prerequisites
 
@@ -168,34 +198,43 @@ pip install -r requirements.txt
 ### Optional
 
 ```bash
-pip install xgboost                        # adds a 6th model
+pip install xgboost                        # adds a sixth model
 pip install snowflake-connector-python     # only if using Snowflake
 ```
 
 ---
 
-## 📖 Usage Guide
+## Usage Guide
 
-### Standard Workflow
+### First-time setup with existing data (upgrading from v2.4)
 
 ```bash
-# Step 1: Fetch real NCAA data from ESPN (~500 games, takes 5-15 min)
+# If you already have a games.json from a previous version:
+python main.py --enrich    # back-fill pre-game averages (takes ~2 seconds)
+python main.py --train     # retrain on honest data
+python main.py --serve
+```
+
+### Standard workflow from scratch
+
+```bash
+# Step 1: Fetch real NCAA data from ESPN (3 seasons, ~2900 games, takes 20-40 min)
 python main.py --fetch
 
 # If ESPN is slow or unavailable, use synthetic data instead:
 python main.py --generate-synthetic
 
-# Step 2: (Optional) Pre-fetch and cache rosters for all teams in the dataset
+# Step 2: (Optional) Pre-fetch and cache rosters for all teams
 python main.py --fetch-rosters
 
 # Step 3: Train all models and register the best one
 python main.py --train
 
-# Step 4: Start the server (auto-learn scheduler starts automatically)
+# Step 4: Start the server
 python main.py --serve
 ```
 
-Open **http://localhost:5000**
+Open http://localhost:5000
 
 ---
 
@@ -203,29 +242,39 @@ Open **http://localhost:5000**
 
 | Command | Description |
 |---------|-------------|
-| `--fetch` | Fetch real NCAA games from ESPN API |
+| `--fetch` | Fetch real NCAA games from ESPN (all configured seasons) |
+| `--enrich` | Back-fill pre-game rolling averages into existing games.json. Run once after upgrading to v2.5, then retrain. |
 | `--fetch-rosters` | Pre-fetch and cache player rosters for all teams in the dataset |
-| `--generate-synthetic` | Generate 500 synthetic games (offline fallback) |
+| `--generate-synthetic` | Generate synthetic games as an offline fallback |
 | `--train` | Train all models, register best by ROC-AUC |
-| `--serve` | Start Flask server + auto-learn scheduler |
+| `--serve` | Start Flask server and auto-learn scheduler |
 | `--list-models` | Print all registered model versions |
 | `--activate v3` | Set a specific version as active |
+| `--max-games N` | Override the config max_games cap for one fetch run |
 | `--storage snowflake` | Use Snowflake instead of local JSON |
 
 ---
 
 ### Configuration
 
-All settings live in `config.yaml` — nothing is hardcoded in the Python file:
+All settings live in `config.yaml`. Nothing is hardcoded in the Python source.
 
 ```yaml
 home_team:
-  name: "Duke Blue Devils"    # Your home team
+  name: "Duke Blue Devils"    # Your home team (must match ESPN display name)
+
+data:
+  pregame_window: 10          # Games to average for pre-game features
+  pregame_min_games: 1        # Min prior games before a record is training-eligible
+
+ncaa_api:
+  seasons: [2022, 2023, 2024] # Multi-season fetch
+  max_games: 3000             # Cap on total games fetched
 
 auto_learn:
   enabled: true
-  fetch_interval_hours: 6     # Check for new games every 6h
-  retrain_interval_hours: 24  # Force retrain every 24h
+  fetch_interval_hours: 6
+  retrain_interval_hours: 24
   min_new_games_to_retrain: 15
   promote_threshold: 0.002    # Only promote if AUC improves by this much
 
@@ -237,15 +286,10 @@ models:
     - extra_trees
     - svm
     - mlp
-    - xgboost   # optional — skipped if xgboost not installed
-
-roster:
-  cache_dir: "data/rosters"
-  cache_ttl_hours: 24
-  team_id_cache: "data/team_ids.json"
+    - xgboost                 # optional, skipped if not installed
 ```
 
-Snowflake credentials are read from environment variables (`SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`) — never hardcoded.
+Snowflake credentials are read from environment variables (`SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`). Never hardcoded.
 
 ---
 
@@ -255,81 +299,47 @@ When `--serve` is running, a background daemon thread manages continuous improve
 
 ```
 Every 6 hours:
-  → Fetch new games from ESPN
-  → Append unique games (deduplicated by game_id)
-  → If ≥ 15 new games added:
-      → Retrain all models
-      → If new best AUC > current AUC + 0.002:
-          → Register new version, promote to active
-      → Else:
-          → Log "skipped" — model did not improve
+    Fetch new games from ESPN
+    Append unique games (deduplicated by game_id)
+    Enrich new games with pre-game rolling averages
+    If 15 or more new games added:
+        Retrain all models
+        If new best AUC > current AUC + 0.002:
+            Register new version, promote to active
+        Else:
+            Log "skipped" with reason
 
 Every 24 hours (regardless of new data):
-  → Force full retrain cycle
+    Force full retrain cycle
 ```
 
-Every decision (promoted / skipped + reason) is written to `data/learning_log.json` and visible in the **Auto-Learn tab** of the dashboard.
+Every decision (promoted or skipped with reason) is written to `data/learning_log.json` and visible in the Auto-Learn tab of the dashboard.
 
 ---
 
 ## Roster System
 
-The roster system allows predictions to be built from individual player selections rather than historical team averages. It uses a separate ESPN endpoint to fetch player rosters and per-player season stats.
+The roster system allows predictions to be built from individual player selections rather than historical team averages. It uses ESPN endpoints to fetch player rosters and per-player season stats.
 
-### How it works
-
-1. **Team ID lookup** — ESPN display name is resolved to an internal team ID, cached to `data/team_ids.json`
-2. **Roster fetch** — `/teams/{id}/roster` returns the player list with embedded stats where available
-3. **Stats fallback** — For players with no embedded stats, `/athletes/{id}/statistics` is called individually
-4. **Aggregation** — Individual player stats are summed (ppg, rebounds, etc.) or FGA-weighted (fg_pct) into team-level features
-5. **Caching** — Full rosters are cached per-team in `data/rosters/<team_id>.json` with a 24-hour TTL
-6. **Async fetching** — Roster loads run in a background thread; the dashboard polls for progress every second and renders players as they arrive
-
-### Pre-fetching
+The fetch runs in a background thread. The dashboard polls for progress every second and renders players as they arrive. Player names appear immediately; stats fill in as the thread progresses.
 
 Running `--fetch-rosters` before serving will populate the cache for all teams currently in the dataset, making roster lookups instant in the dashboard.
-
----
-
-## Project Structure
-
-```
-basketball-predictor/
-│
-├── main.py                  # Entire backend: data, models, API, scheduler
-├── dashboard.html           # Frontend: all tabs, charts, team picker
-├── config.yaml              # All configuration — no hardcoded values
-├── requirements.txt         # Pinned dependencies
-├── README.md
-│
-├── data/
-│   ├── games.json           # ESPN game records (gitignored)
-│   ├── learning_log.json    # Auto-learn history
-│   ├── team_ids.json        # ESPN team ID cache
-│   └── rosters/             # Per-team roster cache (<team_id>.json)
-│
-└── models/
-    ├── registry.json        # Version index + metrics
-    ├── latest_comparison.json
-    ├── comparison_v1.json
-    └── *.pkl                # Versioned model files (gitignored)
-```
 
 ---
 
 ## Dashboard Tabs
 
 ### Predict
-- Home team (Duke) fixed from config
-- **Stats mode:** Pick any opponent from a dropdown — stats auto-fill from their season averages
-- **Roster mode:** Select individual players for each team; stats are aggregated live and fed to the model
-- Confidence % shown with result; computed team stats displayed so you can see exactly what the model used
+- Home team fixed from config, opponent chosen from dropdown
+- Stats mode: stats auto-fill from season averages or rolling window
+- Roster mode: select individual players, aggregate their season stats live before predicting
+- Confidence percentage shown with result; computed team stats displayed showing exactly what the model used
 
 ### Overview
-- Total games, home/away win rates
-- Outcome distribution donut chart
+- Total games, home/away win rates, enrichment rate
+- Outcome distribution chart
 - Active model radar chart
-- **Model AUC Over Time** — visual progression across all registered versions
+- Model AUC over time (visual progression across all registered versions)
 
 ### Model Comparison
 - All models side-by-side metrics table with inline bar charts
@@ -338,18 +348,18 @@ basketball-predictor/
 
 ### Feature Analysis
 - Average stats for home-win vs away-win games
-- Per-model feature importance horizontal bar chart (model selector dropdown)
+- Per-model feature importance horizontal bar chart with model selector
 
-### 🗂 Registry
+### Registry
 - All registered versions with metrics
-- One-click **Activate** to promote any version
+- One-click Activate to promote any version
 - Training size and timestamp per version
 
 ### Auto-Learn
-- Scheduler status (idle / fetching / training) — live polled every 15s
+- Scheduler status (idle / fetching / training) polled every 15 seconds
 - Countdown to next fetch and retrain
 - Full learning log table (promoted / skipped per run)
-- Manual **Trigger Retrain** button
+- Manual Trigger Retrain button
 
 ---
 
@@ -360,36 +370,21 @@ basketball-predictor/
 | GET | `/` | Dashboard |
 | POST | `/predict` | Predict from raw feature values (stats mode) |
 | POST | `/predict/from_roster` | Predict from selected player lists (roster mode) |
-| GET | `/analytics` | Dataset stats + model comparison |
+| GET | `/analytics` | Dataset stats, model comparison, enrichment rate |
 | GET | `/model_info` | Active model metadata |
 | GET | `/registry` | All registered versions |
 | POST | `/registry/activate/<version>` | Promote a version |
-| GET | `/teams` | All teams + season averages |
-| GET | `/team_stats/<name>` | Stats for a specific team |
-| GET | `/home_team` | Configured home team + stats |
+| GET | `/teams` | All teams with season or rolling averages |
+| GET | `/team_stats/<name>` | Stats for a specific team (fuzzy match, optional window) |
+| GET | `/home_team` | Configured home team and stats |
 | GET | `/roster/<team_name>` | Kick off async roster fetch; returns current progress |
-| GET | `/roster/progress/<team_name>` | Poll roster fetch progress (status / players so far) |
-| POST | `/roster/refresh/<team_name>` | Force a fresh ESPN roster fetch (bypass cache) |
-| GET | `/autolearn/status` | Scheduler state |
+| GET | `/roster/progress/<team_name>` | Poll roster fetch progress |
+| POST | `/roster/refresh/<team_name>` | Force a fresh ESPN roster fetch |
+| GET | `/autolearn/status` | Scheduler state and countdowns |
 | POST | `/autolearn/trigger` | Manually trigger retrain |
 | GET | `/learning_log` | Training history |
-| GET | `/features` | Feature list + rolling window options from config |
-| GET | `/debug` | Health check for diagnosing issues |
-
-### Roster prediction request format
-
-```json
-POST /predict/from_roster
-{
-  "home_players": [
-    { "ppg": 18.4, "rpg": 5.1, "apg": 3.2, "spg": 1.1,
-      "bpg": 0.4, "tov": 2.1, "fg_pct": 0.48, "fgm": 6.2, "fga": 12.9 }
-  ],
-  "away_players": [ { ... } ]
-}
-```
-
-Response includes `computed_stats` showing the exact aggregated features passed to the model.
+| GET | `/features` | Feature list and rolling window options from config |
+| GET | `/debug` | Health check: paths, game count, enrichment rate, active model |
 
 ---
 
@@ -397,12 +392,12 @@ Response includes `computed_stats` showing the exact aggregated features passed 
 
 | Metric | Definition |
 |--------|------------|
-| **Accuracy** | (TP + TN) / Total |
-| **Precision** | TP / (TP + FP) |
-| **Recall** | TP / (TP + FN) |
-| **F1-Score** | 2 × (P × R) / (P + R) |
-| **ROC-AUC** | Area under ROC curve — primary selection metric |
-| **CV ROC-AUC** | 5-fold cross-validated AUC ± std |
+| Accuracy | (TP + TN) / Total |
+| Precision | TP / (TP + FP) |
+| Recall | TP / (TP + FN) |
+| F1-Score | 2 x (P x R) / (P + R) |
+| ROC-AUC | Area under ROC curve — primary selection metric |
+| CV ROC-AUC | 5-fold cross-validated AUC and standard deviation |
 
 ---
 
@@ -410,35 +405,38 @@ Response includes `computed_stats` showing the exact aggregated features passed 
 
 | Requirement | Status |
 |-------------|--------|
-| SQL database storage (Snowflake) | ✅ Provisioned, env-var credentials |
-| Local development option | ✅ JSON with full feature parity |
-| Real data ingestion | ✅ ESPN API, 500 games |
-| Multiple traditional ML models | ✅ 5 models (+ optional XGBoost) |
-| Training and evaluation pipeline | ✅ With 5-fold CV |
-| Automated model selection | ✅ By ROC-AUC |
-| Python scripts, no notebooks | ✅ |
-| Command-line interface | ✅ |
-| Model serialization and persistence | ✅ Versioned registry |
-| Interactive web dashboard | ✅ 6 tabs |
-| Analytics visualizations | ✅ Charts, radar, importances |
-| Model retraining workflow | ✅ Automated + manual trigger |
-| No hardcoded secrets | ✅ Environment variables |
-| Data drift handling | ✅ Auto-learn with promote threshold |
-| Roster-based predictions | ✅ Player selection → aggregated team features |
+| SQL database storage (Snowflake) | Done — provisioned, env-var credentials |
+| Local development option | Done — JSON with full feature parity |
+| Real data ingestion (multi-season) | Done — ESPN API, ~2900 games across 3 seasons |
+| Multiple traditional ML models | Done — 5 models plus optional XGBoost |
+| Training and evaluation pipeline | Done — with 5-fold CV |
+| Automated model selection | Done — by ROC-AUC |
+| Python scripts, no notebooks | Done |
+| Command-line interface | Done |
+| Model serialization and persistence | Done — versioned registry |
+| Interactive web dashboard | Done — 6 tabs |
+| Analytics visualizations | Done — charts, radar, importances |
+| Model retraining workflow | Done — automated and manual |
+| No hardcoded secrets | Done — environment variables |
+| Data drift handling | Done — auto-learn with promote threshold |
+| Roster-based predictions | Done — player selection, FGA-weighted aggregation |
+| Structured logging | Done — rotating file handler, module-level loggers |
+| Modular codebase | Done — app/ package, 10 modules, no circular imports |
+| Pre-game features (no leakage) | Done — rolling averages, not in-game stats |
 
 ---
 
 ## Known Limitations
 
-1. **ESPN unofficial API** — no SLA, could change or go down without notice
-2. **`home_ppg` = game score** — since ESPN gives us actual scores rather than season PPG averages, the PPG feature is technically the score from that specific game, not a rolling average
-3. **Roster stats reliability** — embedded stats in the roster response are preferred; the per-player `/statistics` endpoint returns 404 for many players and is used as a fallback only
-4. **No SHAP values** — feature importances are raw model coefficients/impurities, not Shapley values
+1. **ESPN unofficial API** — no SLA, could change structure without notice
+2. **Rolling average cold-start** — each team's first game of the season is excluded from training because there is no prior history to average. With 3 seasons of data this affects a small fraction of records.
+3. **Roster stats reliability** — embedded stats in the ESPN roster response are preferred; the per-player `/statistics` fallback endpoint returns 404 for many college players
+4. **No SHAP values** — feature importances are raw impurity-based values, not Shapley values
 5. **Single-instance Flask** — not production-hardened (no gunicorn, no auth)
 
 ---
 
-## 🛠️ Technical Stack
+## Technical Stack
 
 | Layer | Technology |
 |-------|-----------|
@@ -450,61 +448,34 @@ Response includes `computed_stats` showing the exact aggregated features passed 
 | Data fetch | requests 2.32.5 |
 | Storage | Local JSON / Snowflake |
 | Frontend | HTML5, Chart.js 4.4.2, vanilla JS |
+| Logging | Python logging, RotatingFileHandler |
 
 ---
 
 ## Design Philosophy
 
 ### Engineering Over Accuracy
-This project prioritizes **system engineering** over raw model performance. The goal is to demonstrate:
 
-1. How to build a **maintainable** ML system
-2. How to make models **usable** by non-programmers
-3. How to support **continuous improvement** with new data
-4. How to **deploy** models in production-like environments
+This project prioritizes system engineering over raw model performance. The goal is to demonstrate:
 
-**Lesson:** Real-world ML is 70% engineering, 30% modeling.
+1. How to build a maintainable ML system
+2. How to ensure features represent genuinely pre-game information
+3. How to make models usable by non-programmers
+4. How to support continuous improvement with new data
 
----
+A model with AUC 0.74 on honest pre-game data is more defensible than a model with AUC 0.97 on data that leaks the answer. The drop in AUC from v2.4 to v2.5 is not a regression. It is the correct result.
 
-## License
-
-MIT License.
-This project is submitted as part of academic coursework. It serves as a demonstration of ML engineering best practices and may be used as a learning reference.
+**Lesson:** Real-world ML is 70% engineering, 30% modeling — and the 30% starts with making sure your features are actually predictive.
 
 ---
 
 ## Acknowledgments
 
-**Technologies:**
-- scikit-learn for accessible ML algorithms
-- Flask for lightweight web serving
-- Snowflake for scalable SQL storage
-- Chart.js for beautiful visualizations
+Technologies used: scikit-learn, Flask, Snowflake, Chart.js, PyYAML, requests.
 
-**Concept:**
-- Inspired by real-world ML deployment challenges
-- Designed to bridge the gap between notebooks and production
-- Built to demonstrate that engineering matters as much as algorithms
+Inspired by real-world ML deployment challenges. Designed to bridge the gap between notebooks and production systems.
 
 ---
-
-## Key Takeaways
-
-If you learn one thing from this project, let it be this:
-
-> **A model that works on your laptop is worthless if no one else can use it.**
-
-This project shows how to:
-- Make models **accessible** (web UI)
-- Make models **maintainable** (clear code, documentation)
-- Make models **updateable** (retraining workflow)
-- Make models **production-ready** (API, error handling)
-
-**That's what ML engineering is all about.**
-
----
-
 *Built with 🏀 and ☕ by a student who cares about code quality, not just accuracy metrics.*
 
 **Last Updated:** March 2026  
