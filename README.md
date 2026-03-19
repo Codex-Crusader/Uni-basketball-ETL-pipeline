@@ -14,7 +14,7 @@
 
 ## Preview
 
-![Dashboard](images/dashboard_@1.png)
+![Dashboard](images/dashboard_@3.png)
 
 ### More screenshots below
 
