@@ -8,16 +8,22 @@
 ![Full Marks or Else](https://img.shields.io/badge/Grade-Full%20Marks%20or%20Else%20🔫-red)
 ![Full Marks in Exchange for Puppy](https://img.shields.io/badge/Deal-Full%20Marks%20for%20a%20Puppy-ff69b4)
 
-<details>
-<summary>View Dashboard Screenshots</summary>
+## Preview
 
-![Dashboard 1](images/dashboard_@1.png)
+![Dashboard](images/dashboard_@1.png)
+
+### More screenshots below
+
+<details>
+<summary>Expand</summary>
+
 ![Dashboard 2](images/dashboard_@2.png)
 ![Dashboard 3](images/dashboard_2.png)
 ![Dashboard 4](images/dashboard_3.png)
 ![Dashboard 5](images/dashboard_4.png)
 ![Dashboard 6](images/dashboard_5.png)
 ![Dashboard 7](images/dashboard_6.png)
+
 </details>
 
 ---
