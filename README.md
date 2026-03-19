@@ -1,4 +1,4 @@
-> Please read [LICENSE]([LICENSE](https://github.com/Codex-Crusader/Uni-basketball-ETL-pipeline/blob/main/LICENSE)) and [DISCLAIMER.md]([DISCLAIMER.md](https://github.com/Codex-Crusader/Uni-basketball-ETL-pipeline/blob/main/DISCLAIMER.md)) before using this project.
+> Please read [LICENSE](https://github.com/Codex-Crusader/Uni-basketball-ETL-pipeline/blob/main/LICENSE) and [DISCLAIMER.md](https://github.com/Codex-Crusader/Uni-basketball-ETL-pipeline/blob/main/DISCLAIMER.md) before using this project.
 
 # NCAA Basketball Outcome Predictor
 
