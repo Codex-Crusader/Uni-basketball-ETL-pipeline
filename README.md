@@ -1,3 +1,5 @@
+> Please read [LICENSE]([LICENSE](https://github.com/Codex-Crusader/Uni-basketball-ETL-pipeline/blob/main/LICENSE)) and [DISCLAIMER.md]([DISCLAIMER.md](https://github.com/Codex-Crusader/Uni-basketball-ETL-pipeline/blob/main/DISCLAIMER.md)) before using this project.
+
 # NCAA Basketball Outcome Predictor
 
 > *An end-to-end machine learning pipeline demonstrating production-ready ML engineering practices*
@@ -71,6 +73,7 @@ Uni-basketball-ETL-pipeline/
     ├──config.yaml           All settings, no hardcoded values
     ├──dashboard.html        Frontend: all tabs, charts, team picker
     ├──requirements.txt
+    ├──DISCLAIMER.md
     ├──data/
     │    ├──games.json        ESPN game records with pre-game features
     │    ├──app.log           Rotating log (10 MB x 2 backups = 30 MB ceiling)
