@@ -75,18 +75,25 @@ Uni-basketball-ETL-pipeline/
     │    ├──registry.json     Version index and metrics
     │    ├──latest_comparison.json
     │    └──*.pkl             Versioned model files
-    └──app/
-         ├──__init__.py
-         ├──config.py         Config loading, all CFG constants, Path constants
-         ├──logger.py         RotatingFileHandler setup, get_logger()
-         ├──storage.py        JSON and Snowflake I/O, _sanitize()
-         ├──enrichment.py     Pre-game rolling average pipeline
-         ├──fetcher.py        ESPNFetcher, multi-season fetch
-         ├──roster.py         RosterFetcher, player stat aggregation
-         ├──preprocessing.py  Validation, adaptive depth, prepare_data, team stats
-         ├──models.py         Registry, build_models, train_and_evaluate
-         ├──scheduler.py      AutoLearnScheduler background thread
-         └──api.py            Flask app and all routes
+    ├──app/
+    │    ├──__init__.py
+    │    ├──config.py         Config loading, all CFG constants, Path constants
+    │    ├──logger.py         RotatingFileHandler setup, get_logger()
+    │    ├──storage.py        JSON and Snowflake I/O, _sanitize()
+    │    ├──enrichment.py     Pre-game rolling average pipeline
+    │    ├──fetcher.py        ESPNFetcher, multi-season fetch
+    │    ├──roster.py         RosterFetcher, player stat aggregation
+    │    ├──preprocessing.py  Validation, adaptive depth, prepare_data, team stats
+    │    ├──models.py         Registry, build_models, train_and_evaluate
+    │    ├──scheduler.py      AutoLearnScheduler background thread
+    │    └──api.py            Flask app and all routes
+    └──docs/
+         ├──Future_dev_map.md Future plans regarding repository
+         ├──changelog.md
+         ├──code_flow.md      Explaination of code  
+         ├──math.md           Explaination of mathamatics used in code 
+         └──variable_list.md  List of variables
+
 ```
 
 ### Module Dependency Order
