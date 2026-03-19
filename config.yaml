@@ -1,7 +1,7 @@
 app:
   name: "Basketball Game Outcome Predictor"
   version: "2.5.1"             # v2.5.1 — fair hyperparameters, best model wins on merit
-  debug: true
+  debug: false
   port: 5000
   host: "0.0.0.0"
 
