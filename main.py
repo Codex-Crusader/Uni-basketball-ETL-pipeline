@@ -253,6 +253,5 @@ if __name__ == "__main__":
 # main.py is now ~200 lines. used to be 2000.
 # each module has one job. no circular imports. no print() anywhere.
 # logging goes to data/app.log (10MB rotating) AND console simultaneously.
-# your prof should be impressed. or at least not unimpressed.
 
 # coffee log 26 -> 27
