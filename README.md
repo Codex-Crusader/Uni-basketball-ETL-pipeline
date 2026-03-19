@@ -6,9 +6,11 @@
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
 [![Flask](https://img.shields.io/badge/Flask-3.1.2-green.svg)](https://flask.palletsprojects.com/)
+![Elite Ball Knowledge](https://img.shields.io/badge/Certified-Elite%20Ball%20Knowledge-critical)
 [![scikit--learn](https://img.shields.io/badge/scikit--learn-1.8.0-orange.svg)](https://scikit-learn.org/)
-![Full Marks or Else](https://img.shields.io/badge/Grade-Full%20Marks%20or%20Else%20🔫-red)
-![Full Marks in Exchange for Puppy](https://img.shields.io/badge/Deal-Full%20Marks%20for%20a%20Puppy-ff69b4)
+![Results May Vary](https://img.shields.io/badge/Disclaimer-Results%20May%20Vary-lightgrey)
+![Snake Friendly](https://img.shields.io/badge/Python-Snake%20Approved-green)
+![99% Bug Free](https://img.shields.io/badge/Bugs-99%25%20Free-yellow)
 
 ## Preview
 
