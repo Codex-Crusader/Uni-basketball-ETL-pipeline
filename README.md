@@ -1,6 +1,6 @@
 > Please read [LICENSE](https://github.com/Codex-Crusader/Uni-basketball-ETL-pipeline/blob/main/LICENSE) and [DISCLAIMER.md](https://github.com/Codex-Crusader/Uni-basketball-ETL-pipeline/blob/main/DISCLAIMER.md) before using this project.
 
-# NCAA Basketball Outcome Predictor
+# NCAA Basketball Outcome Predictor [![Live Demo!!!](https://img.shields.io/badge/Live%20Demo-Render-46E3B7?logo=render&logoColor=white)](https://uni-basketball-etl-pipeline.onrender.com/)
 
 > *An end-to-end machine learning pipeline demonstrating production-ready ML engineering practices*
 
