@@ -229,15 +229,15 @@ def main():
         # If no data exists, bootstrap with synthetic data and train immediately
         # so the dashboard is never served with a missing model.
         # On local runs the files will already be there and this is skipped.
-    if not Path("data/games.json").exists():
-        def _bootstrap():
-            log.info("[Startup] No data found — generating synthetic data for cold start...")
-            data = _generate_synthetic(2000)
-            save_to_json(data)
-            log.info("[Startup] Synthetic data ready. Training initial model...")
-            train_and_evaluate(args.storage, triggered_by="startup")
-            log.info("[Startup] Bootstrap complete.")
-        threading.Thread(target=_bootstrap, daemon=True).start()
+        if not Path("data/games.json").exists():
+            def _bootstrap():
+                log.info("[Startup] No data found — generating synthetic data for cold start...")
+                data = _generate_synthetic(2000)
+                save_to_json(data)
+                log.info("[Startup] Synthetic data ready. Training initial model...")
+                train_and_evaluate(args.storage, triggered_by="startup")
+                log.info("[Startup] Bootstrap complete.")
+            threading.Thread(target=_bootstrap, daemon=True).start()
 
         seasons = API_CFG.get("seasons", [API_CFG.get("season", 2024)])
         log.info("=" * 70)
@@ -272,6 +272,5 @@ if __name__ == "__main__":
 # main.py is now ~200 lines. used to be 2000.
 # each module has one job. no circular imports. no print() anywhere.
 # logging goes to data/app.log (10MB rotating) AND console simultaneously.
-# your prof should be impressed. or at least not unimpressed.
 
 # coffee log 26 -> 27
