@@ -48,21 +48,33 @@ The feature `home_fg_pct` stored what the home team shot *during the game*. The 
 
 **The fix:** every feature field now stores a rolling average of the team's last 10 games going into that night. `home_fg_pct = 0.47` means "this team has averaged 47% from the field over their last 10 games." That is knowable before tipoff. That is an actual prediction.
 
-The original in-game stats are still stored under `home_game_*` keys for analytics. They just no longer touch the training matrix.
-
 ```
 v2.4 AUC: 0.9666   (leakage. the model was cheating.)
 v2.5 AUC: ~0.74    (honest. the model is trying.)
 ```
 
-The AUC went down. That is the correct result. A 74% AUC on genuinely pre-game features is more valuable than a 97% AUC on a model that needed to watch the game first.
+The AUC went down. That is the correct result.
 
 ---
 
 ## What It Actually Does
 
-```
-Fetch  ->  Enrich  ->  Validate  ->  Train  ->  Serve
+```mermaid
+flowchart LR
+    A([Fetch\nESPN API\n3 seasons]):::fetch
+    B([Enrich\nRolling averages\nreplace in-game stats]):::enrich
+    C([Validate\nLeakage, balance\noverfitting checks]):::validate
+    D([Train\n6 models compete\nBest AUC wins]):::train
+    E([Serve\nFlask + auto-learn\nscheduler]):::serve
+
+    A --> B --> C --> D --> E
+    E -.->|every 6h| A
+
+    classDef fetch    fill:#e6f1fb,stroke:#378ADD,color:#042c53
+    classDef enrich   fill:#fbeaf0,stroke:#D4537E,color:#4b1528
+    classDef validate fill:#eeedfe,stroke:#7F77DD,color:#3c3489
+    classDef train    fill:#faece7,stroke:#E8593C,color:#4a1b0c
+    classDef serve    fill:#e1f5ee,stroke:#1D9E75,color:#04342c
 ```
 
 **Fetch** pulls real NCAA game data from ESPN's unofficial API across three seasons. No API key required. Around 2900 games total.
@@ -92,7 +104,7 @@ Every training run is a competition. All six models are trained on the same data
 
 All models are wrapped in a `StandardScaler -> estimator` sklearn Pipeline. The scaler fits only on the training set. No leakage there either.
 
-**Adaptive depth:** tree models use `max_depth = log2(n_samples / (10 * n_features))`, floored at 3. At 2300 training samples and 14 features, that ceiling is 4, regardless of what is configured. This prevents the tree models from memorising the training set on smaller datasets.
+**Adaptive depth:** tree models use `max_depth = log2(n_samples / (10 * n_features))`, floored at 3. At 2300 training samples and 14 features, that ceiling is 4 regardless of what is configured.
 
 ---
 
@@ -112,28 +124,36 @@ All pre-game rolling averages. Nothing derived from the outcome.
 
 `ast_to_tov` is computed as the ratio of the averages, not the average of the ratios. Small distinction, more accurate result.
 
-**Removed and why:** `home_ppg`, `away_ppg`, `home_eff_score`, `away_eff_score` were all cut in v2.5. They are derived from the final score, which the model is supposed to be predicting. Keeping them would be cheating again.
+**Removed and why:** `home_ppg`, `away_ppg`, `home_eff_score`, `away_eff_score` were all cut in v2.5. They are derived from the final score, which the model is supposed to be predicting.
 
 ---
 
 ## The Auto-Learn Loop
 
-Once `--serve` is running, a background daemon thread takes over and keeps the system current on its own.
+Once `--serve` is running, a background daemon thread keeps the system current on its own.
 
-```
-Every 6 hours:
-    Hit ESPN for new games
-    Deduplicate by game_id before appending
-    Enrich new games with rolling averages
-    If 15 or more new games were added:
-        Run a full training cycle
-        If new best AUC > current AUC + 0.002:
-            Register and promote the new version
-        Otherwise:
-            Log "skipped" and the reason. Move on.
+```mermaid
+flowchart TD
+    A([Idle]):::idle --> B{6h elapsed?}:::decision
+    B -- Yes --> C[Fetch new games\nfrom ESPN]:::fetch
+    C --> D{15 or more\nnew games?}:::decision
+    D -- Yes --> E[Full training\ncycle]:::train
+    D -- No --> A
+    E --> F{New AUC >=\ncurrent + 0.002?}:::decision
+    F -- Yes --> G[Register and\npromote new version]:::promote
+    F -- No --> H[Log skipped\nwith reason]:::skip
+    G --> A
+    H --> A
+    B -- No --> I{24h elapsed?}:::decision
+    I -- Yes --> E
+    I -- No --> A
 
-Every 24 hours regardless:
-    Force a full retrain cycle
+    classDef idle     fill:#f1efe8,stroke:#888780,color:#2c2c2a
+    classDef decision fill:#eeedfe,stroke:#7F77DD,color:#3c3489
+    classDef fetch    fill:#e6f1fb,stroke:#378ADD,color:#042c53
+    classDef train    fill:#faece7,stroke:#E8593C,color:#4a1b0c
+    classDef promote  fill:#e1f5ee,stroke:#1D9E75,color:#04342c
+    classDef skip     fill:#faeeda,stroke:#BA7517,color:#412402
 ```
 
 The promotion threshold (0.002 AUC) exists so the registry does not fill up with versions that are marginally different and statistically meaningless. Every decision, promoted or skipped, is written to `data/learning_log.json` and visible in the Auto-Learn tab.
@@ -286,24 +306,24 @@ Snowflake credentials are read from environment variables (`SNOWFLAKE_USER`, `SN
 
 | Requirement | Status |
 |-------------|--------|
-| SQL database storage via Snowflake | Done. Provisioned, credentials via env vars. |
-| Local development option | Done. JSON storage with full feature parity. |
-| Real data ingestion across multiple seasons | Done. ESPN API, ~2900 games across 3 seasons. |
-| Multiple traditional ML models | Done. Five models plus optional XGBoost. |
-| Training and evaluation pipeline | Done. With 5-fold cross-validation. |
-| Automated model selection | Done. By ROC-AUC. |
-| Python scripts, no notebooks | Done. |
-| Command-line interface | Done. |
-| Model serialization and versioning | Done. Registry with rollback support. |
-| Interactive web dashboard | Done. Six tabs. |
-| Analytics and visualizations | Done. Charts, radar, feature importances. |
-| Automated and manual retraining | Done. Scheduler plus manual trigger. |
-| No hardcoded secrets | Done. Environment variables throughout. |
-| Data drift handling | Done. Promote threshold guards the registry. |
-| Roster-based predictions | Done. Player selection, FGA-weighted aggregation. |
-| Structured logging | Done. Rotating file handler, module-level loggers. |
-| Modular codebase, no circular imports | Done. Ten modules, one job each. |
-| Honest pre-game features, no leakage | Done. Rolling averages, not in-game stats. |
+| SQL database storage via Snowflake | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) Provisioned, credentials via env vars. |
+| Local development option | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) JSON storage with full feature parity. |
+| Real data ingestion across multiple seasons | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) ESPN API, ~2900 games across 3 seasons. |
+| Multiple traditional ML models | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) Five models plus optional XGBoost. |
+| Training and evaluation pipeline | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) With 5-fold cross-validation. |
+| Automated model selection | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) By ROC-AUC. |
+| Python scripts, no notebooks | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) |
+| Command-line interface | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) |
+| Model serialization and versioning | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) Registry with rollback support. |
+| Interactive web dashboard | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) Six tabs. |
+| Analytics and visualizations | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) Charts, radar, feature importances. |
+| Automated and manual retraining | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) Scheduler plus manual trigger. |
+| No hardcoded secrets | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) Environment variables throughout. |
+| Data drift handling | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) Promote threshold guards the registry. |
+| Roster-based predictions | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) Player selection, FGA-weighted aggregation. |
+| Structured logging | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) Rotating file handler, module-level loggers. |
+| Modular codebase, no circular imports | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) Ten modules, one job each. |
+| Honest pre-game features, no leakage | ![Done](https://img.shields.io/badge/-Done-1D9E75?style=flat-square) Rolling averages, not in-game stats. |
 
 ---
 
@@ -376,9 +396,29 @@ Uni-basketball-ETL-pipeline/
 
 **Module dependency order** (no circular imports, each module only imports from above it):
 
-```
-config.py -> logger.py -> storage.py -> enrichment.py -> fetcher.py
--> roster.py -> preprocessing.py -> models.py -> scheduler.py -> api.py -> main.py
+```mermaid
+flowchart LR
+    C([config.py]):::cfg --> L([logger.py]):::log
+    L --> S([storage.py]):::store
+    S --> E([enrichment.py]):::enrich
+    E --> F([fetcher.py]):::fetch
+    E --> R([roster.py]):::fetch
+    E --> P([preprocessing.py]):::prep
+    P --> M([models.py]):::model
+    M --> SC([scheduler.py]):::sched
+    SC --> A([api.py]):::api
+    A --> MAIN([main.py]):::main
+
+    classDef cfg    fill:#eeedfe,stroke:#7F77DD,color:#3c3489
+    classDef log    fill:#f1efe8,stroke:#888780,color:#2c2c2a
+    classDef store  fill:#e1f5ee,stroke:#1D9E75,color:#04342c
+    classDef enrich fill:#fbeaf0,stroke:#D4537E,color:#4b1528
+    classDef fetch  fill:#e6f1fb,stroke:#378ADD,color:#042c53
+    classDef prep   fill:#faeeda,stroke:#BA7517,color:#412402
+    classDef model  fill:#faece7,stroke:#E8593C,color:#4a1b0c
+    classDef sched  fill:#eaf3de,stroke:#639922,color:#173404
+    classDef api    fill:#eeedfe,stroke:#534AB7,color:#26215c
+    classDef main   fill:#f1efe8,stroke:#5F5E5A,color:#2c2c2a
 ```
 
 ---
