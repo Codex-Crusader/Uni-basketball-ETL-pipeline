@@ -232,8 +232,8 @@ def main():
         if not Path("data/games.json").exists():
             def _bootstrap():
                 log.info("[Startup] No data found — generating synthetic data for cold start...")
-                data = _generate_synthetic(2000)
-                save_to_json(data)
+                synthetic_data = _generate_synthetic(2000)
+                save_to_json(synthetic_data)
                 log.info("[Startup] Synthetic data ready. Training initial model...")
                 train_and_evaluate(args.storage, triggered_by="startup")
                 log.info("[Startup] Bootstrap complete.")
@@ -272,5 +272,5 @@ if __name__ == "__main__":
 # main.py is now ~200 lines. used to be 2000.
 # each module has one job. no circular imports. no print() anywhere.
 # logging goes to data/app.log (10MB rotating) AND console simultaneously.
-
+  
 # coffee log 26 -> 27
