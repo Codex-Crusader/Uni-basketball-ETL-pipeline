@@ -1,6 +1,5 @@
 """
 main.py
-───────
 CLI entry point. Parses arguments and delegates to the appropriate module.
 This file should stay thin — business logic lives in app/.
 
@@ -46,7 +45,7 @@ from app.logger    import get_logger
 log = get_logger(__name__)
 
 
-# ── SYNTHETIC FALLBACK ────────────────────────────────────────────────────────
+# SYNTHETIC FALLBACK
 # you fools, you thought depriving me of my API access would stop me?
 # You have activated my trap card.
 # I summon from my deck: THE SYNTHETIC DATA GENERATOR!
@@ -106,7 +105,7 @@ def _generate_synthetic(num_games: int = 5000):
     return enriched  # very linear data — but at least it's honest now
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
+# CLI
 
 def main():
     parser = argparse.ArgumentParser(description="Basketball Predictor v2.5")
@@ -132,7 +131,7 @@ def main():
     args = parser.parse_args()
     # I love you
 
-    # ── list-models ──────────────────────────────────────────────────────────
+    # list-models
     if args.list_models:
         reg = load_registry()
         if not reg["versions"]:
@@ -148,13 +147,13 @@ def main():
                   f"{v['trained_at'][:19]}{active}")
         return
 
-    # ── activate ─────────────────────────────────────────────────────────────
+    # activate
     if args.activate:
         ok = set_active_version(args.activate)
         print(f"Active → {args.activate}" if ok else f"Version {args.activate} not found.")
         return
 
-    # ── enrich ───────────────────────────────────────────────────────────────
+    # enrich
     if args.enrich:
         # Back-fill pre-game rolling averages into an existing games.json.
         # Makes your existing games training-ready without re-fetching.
@@ -177,7 +176,7 @@ def main():
         log.info("[Enrich] Now run: python main.py --train")
         return
 
-    # ── fetch ────────────────────────────────────────────────────────────────
+    # fetch
     if args.fetch:
         games = fetch_ncaa_data(max_games=args.max_games)
         if games:
@@ -187,7 +186,7 @@ def main():
                 append_to_json(games)
         return
 
-    # ── fetch-rosters ────────────────────────────────────────────────────────
+    # fetch-rosters
     if args.fetch_rosters:
         data = load_from_json()
         if not data:
@@ -208,7 +207,7 @@ def main():
         log.info("[Roster] Done. Success: %d  Failed: %d", ok, fail)
         return
 
-    # ── generate-synthetic ───────────────────────────────────────────────────
+    # generate-synthetic
     if args.generate_synthetic:
         data = _generate_synthetic(5000)
         if args.storage == "snowflake":
@@ -217,12 +216,12 @@ def main():
             save_to_json(data)
         return
 
-    # ── train ────────────────────────────────────────────────────────────────
+    # train
     if args.train:
         train_and_evaluate(args.storage, triggered_by="manual")
         return
 
-    # ── serve ────────────────────────────────────────────────────────────────
+    # serve
     if args.serve:
 
         # Render (and other cloud platforms) wipe the disk on every cold start.
