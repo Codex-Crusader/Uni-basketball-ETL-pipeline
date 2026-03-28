@@ -11,7 +11,7 @@
 ![Snake Friendly](https://img.shields.io/badge/Python-Snake%20Approved-green)
 ![99% Bug Free](https://img.shields.io/badge/Bugs-99%25%20Free-yellow)
 
-**[Try the live demo](https://uni-basketball-etl-pipeline.onrender.com/) — no setup, no install, runs in your browser.**
+**[Try the live demo](https://uni-basketball-etl-pipeline.onrender.com/) - no setup, no install, runs in your browser.**
 *Note: live demo runs on a mix of synthetic and real NCAA data. Model metrics not indicative of real prediction performance.*
 
 ---
