@@ -11,6 +11,8 @@
 ![Snake Friendly](https://img.shields.io/badge/Python-Snake%20Approved-green)
 ![99% Bug Free](https://img.shields.io/badge/Bugs-99%25%20Free-yellow)
 
+> **Written up in full:** [codex-crusader.github.io/projects/uni-basketball-etl-pipeline/](https://codex-crusader.github.io/projects/uni-basketball-etl-pipeline/) covers the problem, the architecture, the results and what it deliberately does not do.
+
 **[Try the live demo](https://uni-basketball-etl-pipeline.onrender.com/) - no setup, no install, runs in your browser.**
 *Note: live demo runs on a mix of synthetic and real NCAA data. Model metrics not indicative of real prediction performance.*
 
